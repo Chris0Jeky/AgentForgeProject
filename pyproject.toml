@@ -31,6 +31,9 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["agentforge*"]
 
+[tool.setuptools.package-data]
+"agentforge.templates" = ["*.toml", "*.md", "*.yml"]
+
 
 [project.entry-points."agentforge.providers"]
 # External provider plugins can register here.
