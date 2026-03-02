@@ -1,0 +1,16 @@
+name: AgentForge Wake
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  wake:
+    if: ${{ github.event.issue.pull_request != null }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Wake event received. Run your local agentforge daemon, or wire a self-hosted runner if you accept the risk."
