@@ -13,4 +13,7 @@ jobs:
     if: ${{ github.event.issue.pull_request != null }}
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Wake event received. Run your local agentforge daemon, or wire a self-hosted runner if you accept the risk."
+      - run: |
+          echo "Wake event received."
+          echo "Recommended: run a local agentforge daemon, or wire a self-hosted runner to run:"
+          echo "  agentforge webhook --event-file $GITHUB_EVENT_PATH"
