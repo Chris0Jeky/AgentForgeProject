@@ -127,12 +127,13 @@ def cmd_queue_list(args: argparse.Namespace) -> int:
         print("No issues found.")
         return 0
     for iss in issues:
-        print(f"#{iss.number}: {iss.title}  ({iss.url})")
+        labs = ", ".join(getattr(iss, "labels", []) or [])
+        lab_s = f" [{labs}]" if labs else ""
+        print(f"#{iss.number}: {iss.title}{lab_s}  ({iss.url})")
     return 0
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     root = find_repo_root(Path(args.repo) if args.repo else None)
-    # Ensure init exists (convenience)
     from agentforge.core.init import init_repo
     if not (root / ".agentforge" / "config.toml").exists():
         init_repo(root, overwrite=False)
@@ -156,6 +157,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         create_prs=args.create_prs,
         draft_prs=not args.no_draft,
         run_daemon=args.daemon,
+        workflow_override=args.workflow,
     )
     return 0
 
@@ -179,8 +181,140 @@ def cmd_serve(args: argparse.Namespace) -> int:
     cfg, pol = load_repo_config(root)
     st_file, _ = state_paths(root, cfg)
     from agentforge.core.server import serve_status
-    serve_status(root, cfg, pol, st_file, host=args.host, port=args.port)
+    serve_status(root, cfg, pol, st_file, host=args.host, port=args.port, enable_actions=args.actions, token=args.token)
     return 0
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    st_file, _ = state_paths(root, cfg)
+    from agentforge.core.server import serve_status
+    serve_status(root, cfg, pol, st_file, host=args.host, port=args.port, enable_actions=True, token=args.token)
+    return 0
+
+
+def cmd_mcp_status(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    # config/policy are not required, but init ensures .agentforge exists
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.mcp import load_mcp_config, docker_mcp_available, docker_mcp_version
+    mcfg = load_mcp_config(root)
+    print("MCP config (.agentforge/mcp.toml):")
+    print(f"  backend     : {mcfg.backend}")
+    print(f"  catalog_ref : {mcfg.catalog_ref}")
+    print(f"  profile     : {mcfg.profile}")
+    print(f"  servers     : {', '.join(mcfg.servers or []) or '(none)'}")
+    print()
+    print(f"docker mcp available: {docker_mcp_available()}")
+    ver = docker_mcp_version()
+    if ver:
+        print("docker mcp version:")
+        print(ver)
+    return 0
+
+def cmd_mcp_catalog(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.mcp import load_mcp_config, docker_mcp_available, docker_catalog_server_ls
+    mcfg = load_mcp_config(root)
+    if not docker_mcp_available():
+        raise SystemExit("docker mcp not available. Install Docker Desktop MCP Toolkit or the docker-mcp plugin.")
+    servers = docker_catalog_server_ls(mcfg.catalog_ref)
+    if args.filter:
+        f = args.filter.strip().lower()
+        servers = [s for s in servers if f in s.lower()]
+    for s in servers:
+        print(s)
+    return 0
+
+def cmd_mcp_profile(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.mcp import load_mcp_config, docker_mcp_available, docker_profile_list, docker_profile_server_ls
+    mcfg = load_mcp_config(root)
+    if not docker_mcp_available():
+        raise SystemExit("docker mcp not available.")
+    print("Profiles:")
+    for p in docker_profile_list():
+        mark = " (this repo)" if p == mcfg.profile else ""
+        print(f"- {p}{mark}")
+    print()
+    print(f"Servers in profile '{mcfg.profile}':")
+    print(docker_profile_server_ls(mcfg.profile))
+    return 0
+
+def cmd_mcp_sync(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.mcp import load_mcp_config, docker_mcp_available, docker_sync_profile
+    mcfg = load_mcp_config(root)
+    if not docker_mcp_available():
+        raise SystemExit("docker mcp not available.")
+    docker_sync_profile(mcfg)
+    print(f"Synced profile '{mcfg.profile}' with servers: {', '.join(mcfg.servers or []) or '(none)'}")
+    return 0
+
+def cmd_mcp_add(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.mcp import load_mcp_config, docker_mcp_available, docker_sync_profile, McpConfig
+    mcfg = load_mcp_config(root)
+    if not docker_mcp_available():
+        raise SystemExit("docker mcp not available.")
+    sid = args.server.strip()
+    docker_sync_profile(McpConfig(backend=mcfg.backend, catalog_ref=mcfg.catalog_ref, profile=mcfg.profile, servers=[sid]))
+    print(f"Added '{sid}' to profile '{mcfg.profile}'")
+    return 0
+
+
+def cmd_lock_list(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.locks import list_locks, is_expired
+    locks = list_locks(root=root, cfg=cfg)
+    if not locks:
+        print("No locks held.")
+        return 0
+    for l in locks:
+        exp = "expired" if is_expired(l) else "active"
+        print(f"- {l.group}: {l.agent}:{l.task} host={l.hostname} pid={l.pid} ({exp})")
+    return 0
+
+def cmd_lock_acquire(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.locks import acquire_lock
+    info = acquire_lock(root=root, cfg=cfg, group=args.group, agent=args.agent, task=args.task, ttl_sec=args.ttl, force=args.force)
+    print(f"Acquired {info.group} for {info.agent}:{info.task}")
+    return 0
+
+def cmd_lock_release(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.locks import release_lock
+    release_lock(root=root, cfg=cfg, group=args.group, agent=args.agent, task=args.task, force=args.force)
+    print(f"Released {args.group}")
+    return 0
+
+def cmd_workflow_run(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.workflow import run_workflow
+    summary = run_workflow(
+        root=root, cfg=cfg, pol=pol,
+        agent=args.agent, task=args.task, workflow=args.workflow,
+        provider_default=args.provider, extra_ctx=None,
+        dry_run=args.dry_run,
+        log_json=not args.no_log,
+    )
+    ok = all(r.ok for r in summary.results)
+    for r in summary.results:
+        mark = "OK" if r.ok else "FAIL"
+        msg = f" - {r.message}" if r.message else ""
+        print(f"[{mark}] step {r.step_index} ({r.step_type}){msg}")
+    if summary.pr_url:
+        print(f"PR: {summary.pr_url}")
+    return 0 if ok else 2
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentforge", description="Local-first agent farm built on git worktrees.")
@@ -252,7 +386,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_boot.add_argument("--create-prs", action="store_true", help="Create draft PRs after pushing.")
     p_boot.add_argument("--no-draft", action="store_true", help="Create non-draft PRs.")
     p_boot.add_argument("--daemon", action="store_true", help="Run PR comment daemon after bootstrap (blocks).")
+    p_boot.add_argument("--workflow", default=None, help="Workflow override (default: auto-selected per lock group).")
     p_boot.set_defaults(func=cmd_bootstrap)
+
+    p_wf = sub.add_parser("workflow", help="Workflow engine (repo-local workflows.toml).")
+    wf_sub = p_wf.add_subparsers(dest="wf_cmd", required=True)
+    p_wfr = wf_sub.add_parser("run", help="Run a named workflow for an existing workspace.")
+    p_wfr.add_argument("--workflow", required=True)
+    p_wfr.add_argument("--agent", required=True)
+    p_wfr.add_argument("--task", required=True)
+    p_wfr.add_argument("--provider", default=None, help="Override provider for agent steps.")
+    p_wfr.add_argument("--dry-run", action="store_true")
+    p_wfr.add_argument("--no-log", action="store_true", help="Disable writing JSON run summaries to .agentforge/logs.")
+    p_wfr.set_defaults(func=cmd_workflow_run)
+
+    p_lock = sub.add_parser("lock", help="Local subsystem locks (exclusive).")
+    lock_sub = p_lock.add_subparsers(dest="lock_cmd", required=True)
+    p_ll = lock_sub.add_parser("list", help="List held locks.")
+    p_ll.set_defaults(func=cmd_lock_list)
+    p_la = lock_sub.add_parser("acquire", help="Acquire a lock.")
+    p_la.add_argument("--group", required=True)
+    p_la.add_argument("--agent", required=True)
+    p_la.add_argument("--task", required=True)
+    p_la.add_argument("--ttl", type=int, default=6*60*60)
+    p_la.add_argument("--force", action="store_true")
+    p_la.set_defaults(func=cmd_lock_acquire)
+    p_lr = lock_sub.add_parser("release", help="Release a lock.")
+    p_lr.add_argument("--group", required=True)
+    p_lr.add_argument("--agent", required=True)
+    p_lr.add_argument("--task", required=True)
+    p_lr.add_argument("--force", action="store_true")
+    p_lr.set_defaults(func=cmd_lock_release)
+
+    p_mcp = sub.add_parser("mcp", help="Manage MCP setup (Docker MCP Toolkit).")
+    mcp_sub = p_mcp.add_subparsers(dest="mcp_cmd", required=True)
+
+    p_ms = mcp_sub.add_parser("status", help="Show MCP configuration and docker-mcp availability.")
+    p_ms.set_defaults(func=cmd_mcp_status)
+
+    p_mc = mcp_sub.add_parser("catalog", help="List catalog server IDs.")
+    p_mc.add_argument("--filter", default=None, help="Substring filter.")
+    p_mc.set_defaults(func=cmd_mcp_catalog)
+
+    p_mp = mcp_sub.add_parser("profile", help="Show profile servers for this repo.")
+    p_mp.set_defaults(func=cmd_mcp_profile)
+
+    p_msync = mcp_sub.add_parser("sync", help="Ensure profile exists and add servers from .agentforge/mcp.toml.")
+    p_msync.set_defaults(func=cmd_mcp_sync)
+
+    p_madd = mcp_sub.add_parser("add", help="Add a server (by server-id) to the configured profile.")
+    p_madd.add_argument("--server", required=True, help="Server ID from the catalog (e.g. playwright).")
+    p_madd.set_defaults(func=cmd_mcp_add)
 
     p_d = sub.add_parser("daemon", help="Poll GitHub PR comments for /agentforge commands.")
     p_d.add_argument("--once", action="store_true")
@@ -262,10 +446,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_wh.add_argument("--event-file", required=True, help="Path to GitHub event JSON (e.g. $GITHUB_EVENT_PATH).")
     p_wh.set_defaults(func=cmd_webhook)
 
-    p_sv = sub.add_parser("serve", help="Serve a local read-only dashboard.")
+    p_sv = sub.add_parser("serve", help="Serve the local dashboard UI.")
     p_sv.add_argument("--host", default="127.0.0.1")
     p_sv.add_argument("--port", type=int, default=5179)
+    p_sv.add_argument("--actions", action="store_true", help="Enable POST actions (spawning, locks, workflow runs).")
+    p_sv.add_argument("--token", default=None, help="Token for POST actions (auto-generated if omitted).")
     p_sv.set_defaults(func=cmd_serve)
+
+    p_ui = sub.add_parser("ui", help="Start the local UI with actions enabled.")
+    p_ui.add_argument("--host", default="127.0.0.1")
+    p_ui.add_argument("--port", type=int, default=5179)
+    p_ui.add_argument("--token", default=None, help="Token for POST actions (auto-generated if omitted).")
+    p_ui.set_defaults(func=cmd_ui)
 
     return p
 
