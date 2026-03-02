@@ -3,37 +3,40 @@
 AgentForge is a **local-first** “agent farm” you can install on any machine to run multiple coding agents **without stepping on each other**.
 
 Core ideas:
-- **Code isolation** via `git worktree` (one task = one directory = one branch).
-- **Runtime isolation** (optional) via Docker Compose project scoping + per-agent ports.
-- **Automation** via a simple orchestrator that can:
+- **Isolation** via `git worktree` (one task = one directory = one branch).
+- **Automation** via a strict orchestrator:
   - spawn worktrees,
-  - run agents (Codex CLI today; others via plugins),
-  - run project harness checks,
-  - react to GitHub PR comment commands.
+  - run an agent provider (Codex CLI today, others via plugins),
+  - run a repo harness (tests/lint/build),
+  - respond to GitHub PR comment commands safely.
 
-AgentForge is meant to be:
-- **fast** in “free mode” (minimal approvals),
-- **recoverable** (agents are contained in disposable worktrees),
-- and **hardenable** over time (policy gates, diff scanners, least-privilege GitHub triggers).
-
-> Status: usable skeleton + working CLI foundation. Expect to extend it to your workflow.
+AgentForge aims to be:
+- **smooth** in “fast mode” (minimal interruptions),
+- **recoverable** (agents work in disposable worktrees),
+- **hardenable** (policy-as-code + diff scanners + role separation).
 
 ---
 
-## Quickstart (local, no GitHub automation)
+## Install
 
 Prereqs:
 - Python 3.11+
 - git
-- (optional) docker + docker compose
-- (optional) GitHub CLI `gh`
+- Optional:
+  - GitHub CLI `gh` (queue + PR + daemon)
+  - Codex CLI `codex` (if using codex provider)
+  - Docker (only if you later add a stack runner)
 
-Install (editable dev install):
+Dev install:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
+
+---
+
+## Quickstart (per repo)
 
 Initialize in a repo:
 ```bash
@@ -41,55 +44,85 @@ cd /path/to/your/repo
 agentforge init
 ```
 
-Spawn a new isolated workspace:
+Edit:
+- `.agentforge/config.toml` (harness commands + repo name)
+- `.agentforge/policy.toml` (allowed commenters, deny forks, etc.)
+
+Spawn a workspace:
 ```bash
 agentforge spawn --agent a1 --task issue-123
 ```
 
-Run an agent in that workspace (example uses Codex CLI):
+Run an agent:
 ```bash
-agentforge run --agent a1 --task issue-123 --role implement --provider codex_cli --prompt "Fix issue-123. Run tests. Open a PR."
+agentforge run --agent a1 --task issue-123 --role implement \
+  --provider codex_cli --auto-commit --auto-push \
+  --prompt "Fix issue-123 and run harness checks."
 ```
 
 ---
 
-## GitHub comment commands (optional)
+## One-command intake (queue bootstrap)
 
-AgentForge supports a strict command grammar from PR comments:
+If you use GitHub issue labels as a queue:
 
-- `/agentforge status`
-- `/agentforge review`
-- `/agentforge fix` (takes the rest of the comment as instructions)
+- queued: `agent:queued`
+- in-progress: `agent:in-progress`
 
-Run a polling daemon:
+Run:
+```bash
+agentforge bootstrap --agents a1,a2 --take 2 --claim --fast --create-prs
+```
+
+What it does:
+- pulls queued issues
+- spawns worktrees
+- claims issues (label move + comment)
+- runs implementer agent for each
+- auto-commits + pushes
+- creates draft PRs
+
+---
+
+## PR comment automation
+
+Run locally:
 ```bash
 agentforge daemon
 ```
 
-> You must configure allowed commenters in `.agentforge/policy.toml`.
+On a PR whose head branch is named `af/<agent>/<task>`, comment:
+
+- `/agentforge status`
+- `/agentforge review`
+- `/agentforge qa`
+- `/agentforge fix` + instructions
+
+---
+
+## GitHub Actions trigger (optional)
+
+You can run AgentForge on a self-hosted runner by passing the event payload to:
+
+```bash
+agentforge webhook --event-file "$GITHUB_EVENT_PATH"
+```
+
+See docs for the security tradeoffs and recommended “wake-only” setups.
+
+---
+
+## Dashboard
+
+Read-only local dashboard:
+
+```bash
+agentforge serve
+# open http://127.0.0.1:5179/
+```
 
 ---
 
 ## Docs
 
-See `docs/`:
-- `01-overview.md` (architecture)
-- `03-quickstart.md` (end-to-end flows)
-- `05-security.md` (threat model + hardening)
-- `07-providers.md` (add Gemini/Claude/local via plugins)
-- `10-porting-notes.md` (what was ported and why)
-- `11-testing-guide.md` (smoke tests and validation workflow)
-- `12-todos-placeholders.md` (tracked placeholders and implementation gaps)
-
----
-
-## Philosophy
-
-**Smooth by default** (your preference): the system will auto-run unless a policy tripwire is hit.
-Tripwires are explicit, testable, and versioned as policy-as-code.
-
----
-
-## Contributing
-
-See `CONTRIBUTING.md`.
+See `docs/` for architecture, security, harness, provider plugins, and roadmap.
