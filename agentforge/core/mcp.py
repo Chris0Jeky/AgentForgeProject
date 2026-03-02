@@ -15,7 +15,7 @@ try:
 except Exception:  # pragma: no cover
     tomllib = None
 
-from .utils import run, which, ensure_dir, atomic_write_text
+from .utils import CommandError, run, which, ensure_dir, atomic_write_text
 
 
 class McpError(RuntimeError):
@@ -45,24 +45,32 @@ class McpConfig:
 
 
 def docker_mcp_available() -> bool:
-    return which("docker") is not None and run(["docker", "mcp", "version"], capture=True).ok
+    if which("docker") is None:
+        return False
+    try:
+        run(["docker", "mcp", "version"], capture=True)
+        return True
+    except Exception:
+        return False
 
 
 def docker_mcp_version() -> Optional[str]:
-    if not docker_mcp_available():
+    if which("docker") is None:
         return None
-    r = run(["docker", "mcp", "version"], capture=True)
-    if not r.ok:
+    try:
+        _, stdout, _ = run(["docker", "mcp", "version"], capture=True)
+    except Exception:
         return None
-    return (r.stdout or "").strip()
+    return (stdout or "").strip()
 
 
 def docker_catalog_server_ls(catalog_ref: str) -> List[str]:
-    r = run(["docker", "mcp", "server", "list", "--catalog", catalog_ref], capture=True)
-    if not r.ok:
-        raise McpError(r.stderr or r.stdout or "docker mcp server list failed")
+    try:
+        _, stdout, _ = run(["docker", "mcp", "server", "list", "--catalog", catalog_ref], capture=True)
+    except CommandError as e:
+        raise McpError(e.stderr or e.stdout or "docker mcp server list failed") from e
     # Output is one server id per line.
-    lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    lines = [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
     # Some versions include headers; keep only token-like first col.
     out: List[str] = []
     for ln in lines:
@@ -73,11 +81,12 @@ def docker_catalog_server_ls(catalog_ref: str) -> List[str]:
 
 
 def docker_profile_list() -> List[str]:
-    r = run(["docker", "mcp", "profile", "list"], capture=True)
-    if not r.ok:
-        raise McpError(r.stderr or r.stdout or "docker mcp profile list failed")
+    try:
+        _, stdout, _ = run(["docker", "mcp", "profile", "list"], capture=True)
+    except CommandError as e:
+        raise McpError(e.stderr or e.stdout or "docker mcp profile list failed") from e
     # best-effort parse: lines are profile names
-    lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    lines = [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
     out: List[str] = []
     for ln in lines:
         if ln.lower().startswith("name"):
@@ -87,13 +96,20 @@ def docker_profile_list() -> List[str]:
 
 
 def docker_profile_server_ls(profile: str) -> List[Dict[str, Any]]:
-    r = run(["docker", "mcp", "profile", "server", "list", "--profile", profile, "--format", "json"], capture=True)
-    if not r.ok:
+    try:
+        _, stdout, _ = run(
+            ["docker", "mcp", "profile", "server", "list", "--profile", profile, "--format", "json"],
+            capture=True,
+        )
+    except CommandError as e_json:
         # Older versions may not support --format json; fall back to text.
-        r2 = run(["docker", "mcp", "profile", "server", "list", "--profile", profile], capture=True)
-        if not r2.ok:
-            raise McpError(r.stderr or r2.stderr or r.stdout or r2.stdout or "docker mcp profile server list failed")
-        lines = [ln.strip() for ln in (r2.stdout or "").splitlines() if ln.strip()]
+        try:
+            _, txt_out, _ = run(["docker", "mcp", "profile", "server", "list", "--profile", profile], capture=True)
+        except CommandError as e_txt:
+            raise McpError(
+                e_json.stderr or e_txt.stderr or e_json.stdout or e_txt.stdout or "docker mcp profile server list failed"
+            ) from e_txt
+        lines = [ln.strip() for ln in (txt_out or "").splitlines() if ln.strip()]
         out: List[Dict[str, Any]] = []
         for ln in lines:
             if ln.lower().startswith("name") and "id" in ln.lower():
@@ -104,33 +120,36 @@ def docker_profile_server_ls(profile: str) -> List[Dict[str, Any]]:
             out.append({"name": parts[0], "id": parts[1] if len(parts) > 1 else ""})
         return out
     try:
-        return json.loads(r.stdout or "[]")
+        return json.loads(stdout or "[]")
     except Exception:
         return []
 
 
 def docker_profile_create(profile: str) -> None:
-    r = run(["docker", "mcp", "profile", "create", "--profile", profile], capture=True)
-    if not r.ok:
+    try:
+        run(["docker", "mcp", "profile", "create", "--profile", profile], capture=True)
+    except CommandError as e:
         # If it already exists, ignore.
-        if "already exists" in (r.stderr or "").lower():
+        if "already exists" in (e.stderr or "").lower():
             return
-        raise McpError(r.stderr or r.stdout or "docker mcp profile create failed")
+        raise McpError(e.stderr or e.stdout or "docker mcp profile create failed") from e
 
 
 def docker_profile_server_add(profile: str, catalog_ref: str, *, server_id: str) -> None:
-    r = run(
-        ["docker", "mcp", "profile", "server", "add", "--profile", profile, "--catalog", catalog_ref, server_id],
-        capture=True,
-    )
-    if not r.ok:
-        raise McpError(r.stderr or r.stdout or "docker mcp profile server add failed")
+    try:
+        run(
+            ["docker", "mcp", "profile", "server", "add", "--profile", profile, "--catalog", catalog_ref, server_id],
+            capture=True,
+        )
+    except CommandError as e:
+        raise McpError(e.stderr or e.stdout or "docker mcp profile server add failed") from e
 
 
 def docker_profile_server_remove(profile: str, *, name: str) -> None:
-    r = run(["docker", "mcp", "profile", "server", "remove", "--profile", profile, name], capture=True)
-    if not r.ok:
-        raise McpError(r.stderr or r.stdout or "docker mcp profile server remove failed")
+    try:
+        run(["docker", "mcp", "profile", "server", "remove", "--profile", profile, name], capture=True)
+    except CommandError as e:
+        raise McpError(e.stderr or e.stdout or "docker mcp profile server remove failed") from e
 
 
 def docker_sync_profile(cfg: McpConfig) -> None:
