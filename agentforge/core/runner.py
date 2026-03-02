@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from .config import RepoConfig, Policy
 from .workspace import Workspace
 from .harness import run_harness_step
-from .diffscan import scan_diff, git_diff_text
+from .diffscan import scan_diff, git_diff_text, changed_files, numstat_total_changed
+from .guardrails import evaluate_policy_globs
 from .utils import out, run
 from agentforge.providers import get_provider
 
@@ -30,11 +31,10 @@ def _git_has_changes(ws_path: Path) -> bool:
 
 def _git_commit_all(ws_path: Path, message: str) -> None:
     run(["git", "add", "-A"], cwd=ws_path)
-    # allow empty? no. If nothing to commit, git commit returns non-zero
     run(["git", "commit", "-m", message], cwd=ws_path)
 
-def _git_push(ws_path: Path, branch: str) -> None:
-    run(["git", "push", "-u", "origin", branch], cwd=ws_path)
+def _git_push(ws_path: Path, branch: str, remote: str="origin") -> None:
+    run(["git", "push", "-u", remote, branch], cwd=ws_path)
 
 def run_agent_role(root: Path, cfg: RepoConfig, pol: Policy, ws: Workspace, *, provider: str, role: str, prompt: str, auto_commit: bool, auto_push: bool) -> None:
     ws_path = Path(ws.path)
@@ -76,7 +76,25 @@ def run_agent_role(root: Path, cfg: RepoConfig, pol: Policy, ws: Workspace, *, p
     if not res.ok:
         raise SystemExit(f"Provider {provider} failed: {res.stderr}")
 
-    # Risk scan (always)
+    # Guardrails: policy glob enforcement
+    files = changed_files(ws_path, base_ref=cfg.default_base_ref)
+    glob_findings = evaluate_policy_globs(
+        changed_files=files,
+        forbid_globs=pol.forbid_globs or [],
+        protect_globs=pol.protect_globs or [],
+        protect_behavior=pol.protect_behavior or "warn",
+    )
+    blocks = [f for f in glob_findings if f.severity == "block"]
+    warns = [f for f in glob_findings if f.severity == "warn"]
+    if warns:
+        print("Guardrail warnings:")
+        for w in warns:
+            print(f"- {w.message}")
+    if blocks:
+        msg = "\n".join(f"- {b.message}" for b in blocks)
+        raise SystemExit("Guardrail blocks:\n" + msg)
+
+    # Guardrails: diff scan patterns
     findings = scan_diff(ws_path, base_ref=cfg.default_base_ref)
     high = [f for f in findings if f.severity == "high"]
     if high:
@@ -86,13 +104,18 @@ def run_agent_role(root: Path, cfg: RepoConfig, pol: Policy, ws: Workspace, *, p
             "Resolve manually or tune policy/scan rules."
         )
 
+    # Guardrails: max changed lines
+    total_changed = numstat_total_changed(ws_path, base_ref=cfg.default_base_ref)
+    if total_changed > pol.max_changed_lines:
+        raise SystemExit(f"Diff too large ({total_changed} changed lines) > policy max_changed_lines={pol.max_changed_lines}")
+
     # Harness check gate
-    if pol.require_harness_check and (cfg.harness_check or []):
+    if pol.require_harness_check and (cfg.harness_check or []) and role in ["implement", "fix"]:
         run_harness_step(root, cfg, ws, step="check", extra_env=None)
 
     # Auto commit/push
-    if auto_commit and pol.allow_auto_commit:
+    if auto_commit and pol.allow_auto_commit and role in ["implement", "fix"]:
         if _git_has_changes(ws_path):
             _git_commit_all(ws_path, message=f"[{ws.agent}] {role}: {ws.task}")
-    if auto_push and pol.allow_auto_push:
-        _git_push(ws_path, ws.branch)
+    if auto_push and pol.allow_auto_push and role in ["implement", "fix"]:
+        _git_push(ws_path, ws.branch, remote=cfg.default_remote)
