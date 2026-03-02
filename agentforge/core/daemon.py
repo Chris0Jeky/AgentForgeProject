@@ -163,6 +163,15 @@ def run_daemon_once(root: Path, cfg: RepoConfig, pol: Policy, st_file: Path) -> 
             except Exception as e:
                 post_pr_comment(pr_number, f"AgentForge error handling command: {e}")
 
+
+    # Sticky lock maintenance (best-effort). This renews sticky locks and can
+    # auto-release them when their linked PR is merged/closed.
+    try:
+        from .lock_maintenance import maybe_maintain_sticky_locks
+        maybe_maintain_sticky_locks(root, cfg, st_file)
+    except Exception:
+        pass
+
 def run_daemon_forever(root: Path, cfg: RepoConfig, pol: Policy, st_file: Path) -> None:
     while True:
         run_daemon_once(root, cfg, pol, st_file)
