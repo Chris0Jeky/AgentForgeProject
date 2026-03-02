@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .utils import ensure_dir, run
+from .utils import ensure_dir, run, out
 from .state import load_state, save_state, state_lock
 from .config import RepoConfig, Policy
+from .guardrails import sanitize_id
 
 @dataclass(frozen=True)
 class Workspace:
@@ -19,25 +19,14 @@ class Workspace:
     port: int
     compose_project: Optional[str] = None
 
-_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-def _sanitize(s: str) -> str:
-    s = s.strip().replace(" ", "-")
-    s = _SAFE_RE.sub("-", s)
-    s = re.sub(r"-{2,}", "-", s)
-    return s.strip("-") or "task"
-
 def _ws_key(agent: str, task: str) -> str:
     return f"{agent}:{task}"
 
 def _branch_name(agent: str, task: str) -> str:
-    # Stable and parseable: af/<agent>/<task>
-    safe_agent = _sanitize(agent)
-    safe_task = _sanitize(task)
-    return f"af/{safe_agent}/{safe_task}"
+    return f"af/{sanitize_id(agent)}/{sanitize_id(task)}"
 
 def _folder_name(agent: str, task: str) -> str:
-    return f"{_sanitize(agent)}-{_sanitize(task)}"
+    return f"{sanitize_id(agent)}-{sanitize_id(task)}"
 
 def _alloc_port(cfg: RepoConfig, st: Dict[str, Any], agent: str, task: str, path: Path) -> int:
     used = {int(p) for p in st.get("ports", {}).keys()}
@@ -52,23 +41,39 @@ def _alloc_port(cfg: RepoConfig, st: Dict[str, Any], agent: str, task: str, path
             return p
     raise SystemExit("No free ports left in pool")
 
+def _has_remote(root: Path, remote: str) -> bool:
+    try:
+        remotes = out(["git", "remote"], cwd=root).splitlines()
+        return remote in [r.strip() for r in remotes if r.strip()]
+    except Exception:
+        return False
+
 def spawn_workspace(root: Path, cfg: RepoConfig, pol: Policy, state_file: Path, *, agent: str, task: str, base_ref: Optional[str]=None) -> Workspace:
     ensure_dir(root / cfg.worktrees_dir)
     wpath = root / cfg.worktrees_dir / _folder_name(agent, task)
     if wpath.exists():
         raise SystemExit(f"Workspace path exists: {wpath}")
 
-    # Fetch remotes
-    run(["git", "fetch", "origin", "--prune"], cwd=root)
+    # Fetch remotes (best-effort)
+    if _has_remote(root, cfg.default_remote):
+        try:
+            run(["git", "fetch", cfg.default_remote, "--prune"], cwd=root)
+        except Exception:
+            pass
 
     br = _branch_name(agent, task)
     base = base_ref or cfg.default_base_ref
+    # If base ref doesn't exist locally (e.g., no remote), fall back to HEAD
+    try:
+        run(["git", "rev-parse", "--verify", base], cwd=root)
+    except Exception:
+        base = "HEAD"
     run(["git", "worktree", "add", "-b", br, str(wpath), base], cwd=root)
 
     with state_lock(state_file):
         st = load_state(state_file)
         port = _alloc_port(cfg, st, agent, task, wpath)
-        compose_project = f"{cfg.compose_project_prefix}-{_sanitize(agent)}-{_sanitize(task)}" if cfg.compose_file else None
+        compose_project = f"{cfg.compose_project_prefix}-{sanitize_id(agent)}-{sanitize_id(task)}" if cfg.compose_file else None
         st.setdefault("workspaces", {})[_ws_key(agent, task)] = {
             "agent": agent,
             "task": task,
@@ -130,7 +135,6 @@ def list_workspaces(state_file: Path) -> List[Workspace]:
                 compose_project=v.get("compose_project"),
             )
         )
-    # Stable ordering
     out_ws.sort(key=lambda w: (w.agent, w.task))
     return out_ws
 
