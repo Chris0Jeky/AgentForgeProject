@@ -4,7 +4,11 @@
 # Example: repo = "Chris0Jeky/Taskdeck"
 repo = ""
 
+# Git defaults
+default_remote = "origin"
+default_base_branch = "main"
 default_base_ref = "origin/main"
+
 worktrees_dir = ".worktrees"
 
 # State/log/cache dirs (recommend leaving defaults)
@@ -24,7 +28,7 @@ compose_profile = ""
 compose_project_prefix = "af"
 
 # Harness commands (project-specific)
-# Use bash -lc to run; keep commands idempotent.
+# Use shell (bash/sh/pwsh) to run; keep commands idempotent.
 harness_setup = [
   # "npm ci",
 ]
@@ -37,3 +41,8 @@ default_provider = "codex_cli"
 
 # PR comment poll interval (seconds)
 poll_interval_sec = 45
+
+# GitHub issue queue defaults
+queue_label = "agent:queued"
+in_progress_label = "agent:in-progress"
+done_label = "agent:done"
