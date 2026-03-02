@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import time
 from pathlib import Path
 
 from agentforge.core.config import find_repo_root, load_repo_config
@@ -184,6 +186,41 @@ def cmd_serve(args: argparse.Namespace) -> int:
     serve_status(root, cfg, pol, st_file, host=args.host, port=args.port, enable_actions=args.actions, token=args.token)
     return 0
 
+
+def cmd_mcp_gateway_list(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.mcp import list_gateways
+
+    gws = list_gateways(root, cfg)
+    print(json.dumps({"gateways": gws}, indent=2))
+    return 0
+
+
+def cmd_mcp_gateway_start(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.mcp import load_mcp_config, ensure_gateway_running
+
+    mcfg = load_mcp_config(root)
+    key = args.key.strip() if args.key else None
+    transport = args.transport.strip() if args.transport else None
+    gw = ensure_gateway_running(root, cfg, mcfg, key=key, transport=transport)
+    print(json.dumps(gw, indent=2))
+    return 0
+
+
+def cmd_mcp_gateway_stop(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.mcp import stop_gateway
+
+    key = args.key.strip() if args.key else None
+    stop_gateway(root, cfg, key=key)
+    print("ok")
+    return 0
+
+
 def cmd_ui(args: argparse.Namespace) -> int:
     root = find_repo_root(Path(args.repo) if args.repo else None)
     cfg, pol = load_repo_config(root)
@@ -295,6 +332,34 @@ def cmd_lock_release(args: argparse.Namespace) -> int:
     release_lock(root=root, cfg=cfg, group=args.group, agent=args.agent, task=args.task, force=args.force)
     print(f"Released {args.group}")
     return 0
+
+
+def cmd_lock_maintain(args: argparse.Namespace) -> int:
+    root = find_repo_root(Path(args.repo) if args.repo else None)
+    cfg, pol = load_repo_config(root)
+    from agentforge.core.lock_maintenance import maintain_sticky_locks
+
+    interval = int(args.interval or 0) or int(getattr(cfg, "lock_renew_interval_sec", 120) or 120)
+    dry_run = bool(args.dry_run)
+
+    def once() -> None:
+        actions = maintain_sticky_locks(root, cfg, dry_run=dry_run)
+        if not actions:
+            print("(no sticky locks)")
+            return
+        for a in actions:
+            pr = f" PR#{a.pr_number}" if a.pr_number else ""
+            print(f"{a.action:8s} {a.group}{pr}  {a.reason}")
+
+    if args.forever:
+        print(f"Maintaining sticky locks every {interval}s (dry_run={dry_run})")
+        while True:
+            once()
+            time.sleep(interval)
+    else:
+        once()
+    return 0
+
 
 def cmd_workflow_run(args: argparse.Namespace) -> int:
     root = find_repo_root(Path(args.repo) if args.repo else None)
@@ -418,6 +483,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_lr.add_argument("--force", action="store_true")
     p_lr.set_defaults(func=cmd_lock_release)
 
+    p_lm = lock_sub.add_parser("maintain", help="Renew sticky locks and optionally auto-release on merged/closed PRs.")
+    p_lm.add_argument("--dry-run", action="store_true", help="Do not modify locks; just report actions.")
+    p_lm.add_argument("--forever", action="store_true", help="Run maintenance loop forever.")
+    p_lm.add_argument("--interval", type=int, default=0, help="Override maintenance interval seconds.")
+    p_lm.set_defaults(func=cmd_lock_maintain)
+
     p_mcp = sub.add_parser("mcp", help="Manage MCP setup (Docker MCP Toolkit).")
     mcp_sub = p_mcp.add_subparsers(dest="mcp_cmd", required=True)
 
@@ -437,6 +508,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_madd = mcp_sub.add_parser("add", help="Add a server (by server-id) to the configured profile.")
     p_madd.add_argument("--server", required=True, help="Server ID from the catalog (e.g. playwright).")
     p_madd.set_defaults(func=cmd_mcp_add)
+
+    p_mgw = mcp_sub.add_parser("gateway", help="Manage Docker MCP Gateway (optional).")
+    gw_sub = p_mgw.add_subparsers(dest="mcp_gw_cmd", required=True)
+
+    p_gwl = gw_sub.add_parser("list", help="List known gateways started by AgentForge.")
+    p_gwl.set_defaults(func=cmd_mcp_gateway_list)
+
+    p_gws = gw_sub.add_parser("start", help="Start (or ensure) a gateway.")
+    p_gws.add_argument("--key", default=None, help="Scope key (default: global). Example: a1::issue-123")
+    p_gws.add_argument("--transport", default=None, choices=["sse", "streaming"], help="Override transport.")
+    p_gws.set_defaults(func=cmd_mcp_gateway_start)
+
+    p_gwst = gw_sub.add_parser("stop", help="Stop a gateway.")
+    p_gwst.add_argument("--key", default=None, help="Scope key (default: global).")
+    p_gwst.set_defaults(func=cmd_mcp_gateway_stop)
 
     p_d = sub.add_parser("daemon", help="Poll GitHub PR comments for /agentforge commands.")
     p_d.add_argument("--once", action="store_true")
