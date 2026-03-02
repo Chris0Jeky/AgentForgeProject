@@ -16,6 +16,7 @@ from .github import (
     post_pr_comment,
 )
 from .runner import run_agent_role
+from .harness import run_harness_step
 
 COMMAND_RE = re.compile(r"^/agentforge\s+(?P<cmd>\w+)(?P<rest>[\s\S]*)$", re.IGNORECASE)
 
@@ -36,23 +37,26 @@ def _branch_to_agent_task(head_ref: str) -> Optional[Tuple[str, str]]:
     task = "/".join(parts[2:])
     return agent, task
 
-def _find_workspace(cfg: RepoConfig, st_file: Path, agent: str, task: str) -> Optional[Workspace]:
+def _find_workspace(st_file: Path, agent: str, task: str) -> Optional[Workspace]:
     for ws in list_workspaces(st_file):
         if ws.agent == agent and ws.task == task:
             return ws
     return None
 
 def _handle_command(root: Path, cfg: RepoConfig, pol: Policy, st_file: Path, pr_number: int, author: str, cmd: str, rest: str) -> None:
-    cmd_l = cmd.lower()
+    cmd_l = cmd.lower().strip()
+
     if cmd_l == "help":
         post_pr_comment(pr_number,
             "AgentForge commands:\n"
             "- `/agentforge status`\n"
             "- `/agentforge review`\n"
-            "- `/agentforge fix` (put instructions after the command)\n"
+            "- `/agentforge qa` (runs harness check)\n"
+            "- `/agentforge fix` <instructions>\n"
             "- `/agentforge help`\n"
         )
         return
+
     if cmd_l == "status":
         post_pr_comment(pr_number, "AgentForge is alive on this host.")
         return
@@ -67,7 +71,7 @@ def _handle_command(root: Path, cfg: RepoConfig, pol: Policy, st_file: Path, pr_
         post_pr_comment(pr_number, f"Refusing: PR head ref '{info.head_ref}' does not match af/<agent>/<task> naming.")
         return
     agent, task = at
-    ws = _find_workspace(cfg, st_file, agent, task)
+    ws = _find_workspace(st_file, agent, task)
     if not ws:
         post_pr_comment(pr_number, f"No local workspace for {agent}:{task}. Run `agentforge spawn --agent {agent} --task {task}` on the host.")
         return
@@ -76,9 +80,18 @@ def _handle_command(root: Path, cfg: RepoConfig, pol: Policy, st_file: Path, pr_
         post_pr_comment(pr_number, f"Running review agent for {agent}:{task} ...")
         try:
             run_agent_role(root, cfg, pol, ws, provider=cfg.default_provider, role="review", prompt=rest.strip() or "", auto_commit=False, auto_push=False)
-            post_pr_comment(pr_number, "Review finished. (If using Codex CLI, check your local logs/terminal output.)")
+            post_pr_comment(pr_number, "Review finished. (Check local logs/terminal output for details.)")
         except Exception as e:
             post_pr_comment(pr_number, f"Review failed: {e}")
+        return
+
+    if cmd_l == "qa":
+        post_pr_comment(pr_number, f"Running harness check for {agent}:{task} ...")
+        try:
+            run_harness_step(root, cfg, ws, step="check", extra_env=None)
+            post_pr_comment(pr_number, "Harness check: PASS")
+        except Exception as e:
+            post_pr_comment(pr_number, f"Harness check: FAIL\n{e}")
         return
 
     if cmd_l == "fix":
