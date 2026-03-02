@@ -39,6 +39,13 @@ harness_check = [
 # Default provider adapter
 default_provider = "codex_cli"
 
+# Default workflow name (from .agentforge/workflows.toml)
+default_workflow = "default"
+
+# Auto-lock / auto-workflow routing strategy when pulling from the GitHub queue.
+# Options: none | labels | keywords | labels_then_keywords
+auto_lock_strategy = "labels_then_keywords"
+
 # PR comment poll interval (seconds)
 poll_interval_sec = 45
 

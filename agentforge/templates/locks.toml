@@ -1,0 +1,48 @@
+# AgentForge lock groups (repo-local)
+#
+# Locks are exclusive per group name, stored locally in:
+#   .agentforge/state/locks/<group>.lock.json
+#
+# The entries in this file are **metadata** that help automation decide:
+# - which lock group to acquire for a given GitHub issue
+# - which workflow to run by default for that group
+#
+# Usage:
+#   agentforge lock acquire --group frontend --agent a1 --task issue-123
+# Or in a workflow:
+#   {type="lock", action="acquire", group="{lock_group}"}
+#
+# Group fields (v0.2):
+# - globs:     files/dirs typically owned by this subsystem (docs / humans / future path-based inference)
+# - labels:    GitHub issue labels that map to this group (case-insensitive exact match)
+# - keywords:  substrings in issue title that map to this group (case-insensitive)
+# - workflow:  default workflow name to run for this group (bootstrap can auto-select)
+# - priority:  higher wins when multiple groups match
+# - default:   used when no group matches (exactly one group should be default)
+
+[groups.repo]
+default = true
+priority = 0
+workflow = "default"
+globs = ["**"]
+
+[groups.backend]
+priority = 50
+workflow = "backend"
+labels = ["area:backend", "backend", "api"]
+keywords = ["backend", "api", "server"]
+globs = ["backend/**", "api/**", "server/**"]
+
+[groups.frontend]
+priority = 50
+workflow = "frontend"
+labels = ["area:frontend", "frontend", "ui"]
+keywords = ["frontend", "ui", "web"]
+globs = ["frontend/**", "web/**", "ui/**"]
+
+[groups.docs]
+priority = 10
+workflow = "docs"
+labels = ["docs"]
+keywords = ["readme", "docs", "documentation"]
+globs = ["docs/**", "**/*.md"]
