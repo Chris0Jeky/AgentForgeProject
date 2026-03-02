@@ -20,6 +20,7 @@ def init_repo(root: Path, overwrite: bool=False) -> None:
     ensure_dir(af_dir / "state")
     ensure_dir(af_dir / "logs")
     ensure_dir(af_dir / "cache")
+    ensure_dir(af_dir / "prompts")
 
     # Keep state/log/cache uncommitted, but commit configs/policies.
     gi = af_dir / ".gitignore"
@@ -29,4 +30,14 @@ def init_repo(root: Path, overwrite: bool=False) -> None:
     _copy_template("config.toml", af_dir / "config.toml", overwrite=overwrite)
     _copy_template("policy.toml", af_dir / "policy.toml", overwrite=overwrite)
     _copy_template("AGENTFORGE_RULES.md", af_dir / "AGENTFORGE_RULES.md", overwrite=overwrite)
+
+    # New: workflows + locks
+    _copy_template("workflows.toml", af_dir / "workflows.toml", overwrite=overwrite)
+    _copy_template("locks.toml", af_dir / "locks.toml", overwrite=overwrite)
+    _copy_template("mcp.toml", af_dir / "mcp.toml", overwrite=overwrite)
+
+    # Prompt templates
+    _copy_template("issue_implement.md", af_dir / "prompts" / "issue_implement.md", overwrite=overwrite)
+
+    # GitHub workflow templates
     _copy_template("agentforge-wake.yml", root / ".github" / "workflows" / "agentforge-wake.yml", overwrite=overwrite)
