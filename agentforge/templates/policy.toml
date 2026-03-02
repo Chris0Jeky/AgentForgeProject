@@ -1,0 +1,35 @@
+# AgentForge policy (commit this file)
+#
+# Goals:
+# - smooth by default ("fast")
+# - hard stop on high-risk diffs (scanner)
+# - only accept PR comment commands from allowlisted users
+
+mode = "fast"  # fast | safe
+
+# Who can control the daemon via PR comments:
+allowed_comment_authors = [
+  # "your-github-username"
+]
+
+# Safer default for automation:
+deny_forks = true
+
+# Optional: hard forbid these paths from being changed by automation:
+forbid_globs = [
+  # ".github/workflows/**",
+  # ".agentforge/**",
+]
+
+# Optional: allow changes but trip a "manual review required" gate
+protect_globs = [
+  # "scripts/**",
+]
+
+# Automation risk threshold heuristics:
+max_changed_lines = 4000
+
+# Automation behavior:
+require_harness_check = true
+allow_auto_commit = true
+allow_auto_push = true
