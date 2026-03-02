@@ -4,7 +4,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 try:
     import tomllib  # py3.11+
@@ -18,11 +18,13 @@ from .harness import run_harness_step
 from .runner import run_agent_role
 from .pr import create_pr
 from .github import gh_json, post_pr_comment
-from .locks import acquire_lock, release_lock, LockTakenError
+from .locks import acquire_lock, release_lock, LockTakenError, mark_lock_sticky
 from .utils import ensure_dir
+
 
 class WorkflowError(RuntimeError):
     pass
+
 
 @dataclass(frozen=True)
 class WorkflowStepResult:
@@ -30,6 +32,7 @@ class WorkflowStepResult:
     step_type: str
     ok: bool
     message: str = ""
+
 
 @dataclass(frozen=True)
 class WorkflowRunSummary:
@@ -41,9 +44,11 @@ class WorkflowRunSummary:
     results: List[WorkflowStepResult]
     pr_url: Optional[str] = None
 
+
 class _SafeDict(dict):
     def __missing__(self, key):
         return "{" + key + "}"
+
 
 def _fmt(s: str, ctx: Dict[str, Any]) -> str:
     try:
@@ -77,19 +82,22 @@ def _eval_bool(v: Any, ctx: Dict[str, Any], *, default: bool = True) -> bool:
     # Any other string -> default to truthy
     return True
 
+
 def _load_toml(path: Path) -> Dict[str, Any]:
     if tomllib is None:
         raise SystemExit("Python 3.11+ required for tomllib.")
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
+
 def load_workflows(root: Path) -> Dict[str, List[Dict[str, Any]]]:
     """Load `.agentforge/workflows.toml`.
 
-    Schema (v0.1):
+    Schema (v0.3):
       [workflow.<name>]
       steps = [
-        {type="lock", action="acquire", group="backend"},
+        {type="lock", action="acquire", group="backend", sticky=true},
         {type="agent", role="implement", provider="codex_cli", prompt="..."},
+        {type="pr", action="create", title="...", draft=true},
         ...
       ]
     """
@@ -104,11 +112,13 @@ def load_workflows(root: Path) -> Dict[str, List[Dict[str, Any]]]:
         workflows[str(name)] = [dict(s) for s in steps]
     return workflows
 
+
 def _find_ws(state_file: Path, agent: str, task: str) -> Workspace:
     for ws in list_workspaces(state_file):
         if ws.agent == agent and ws.task == task:
             return ws
     raise SystemExit(f"Workspace not found: {agent}:{task}. Use `agentforge spawn` first.")
+
 
 def _read_prompt(step: Dict[str, Any], root: Path, ws_path: Path, ctx: Dict[str, Any]) -> str:
     if "prompt_file" in step and step["prompt_file"]:
@@ -122,12 +132,14 @@ def _read_prompt(step: Dict[str, Any], root: Path, ws_path: Path, ctx: Dict[str,
         return _fmt(str(step["prompt"]), ctx)
     return ""
 
+
 def _get_pr_number(ws_path: Path) -> Optional[int]:
     try:
         j = gh_json(["pr", "view", "--json", "number"], cwd=ws_path) or {}
         return int(j.get("number"))
     except Exception:
         return None
+
 
 def run_workflow(
     *,
@@ -141,49 +153,66 @@ def run_workflow(
     extra_ctx: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
     log_json: bool = True,
+    event_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> WorkflowRunSummary:
+    """Run a named workflow for an existing workspace.
+
+    event_cb is invoked with JSON-serializable dicts for:
+    - workflow_start/workflow_end
+    - step_start/step_end
+    """
     workflows = load_workflows(root)
     if workflow not in workflows:
         raise SystemExit(f"Workflow not found: {workflow}. Available: {', '.join(sorted(workflows.keys()))}")
+    steps = workflows[workflow]
 
     state_file, logs_dir = state_paths(root, cfg)
     ws = _find_ws(state_file, agent, task)
     ws_path = Path(ws.path)
 
+    provider_default = provider_default or cfg.default_provider
+
+    started = int(time.time())
+    results: List[WorkflowStepResult] = []
+    pr_url: Optional[str] = None
+
+    # Execution context for templates in steps
     ctx: Dict[str, Any] = {
         "agent": ws.agent,
         "task": ws.task,
         "branch": ws.branch,
-        "port": ws.port,
-        "workspace": ws.path,
-        "workflow": workflow,
         "base_ref": cfg.default_base_ref,
-        # Defaults for optional template vars (bootstrap can override via extra_ctx)
-        "issue_number": "",
-        "issue_title": "",
-        "issue_url": "",
-        "issue_labels": "",
-        "issue_body": "",
-        "lock_group": "repo",
-        "create_prs": True,
-        "draft_prs": True,
     }
-
     if extra_ctx:
-        for k, v in extra_ctx.items():
-            ctx[str(k)] = v
+        ctx.update(extra_ctx)
 
+    def emit(ev: Dict[str, Any]) -> None:
+        if not event_cb:
+            return
+        try:
+            event_cb(ev)
+        except Exception:
+            # Never let logging break the workflow.
+            return
 
-    steps = workflows[workflow]
-    results: List[WorkflowStepResult] = []
-    started = int(time.time())
-    pr_url: Optional[str] = None
-
-    def record(i: int, t: str, ok: bool, msg: str="") -> None:
+    def record(i: int, t: str, ok: bool, msg: str = "", **extra: Any) -> None:
         results.append(WorkflowStepResult(step_index=i, step_type=t, ok=ok, message=msg))
+        emit({"type": "step_end", "step_index": i, "step_type": t, "ok": ok, "message": msg, **(extra or {})})
+
+    emit(
+        {
+            "type": "workflow_start",
+            "workflow": workflow,
+            "agent": ws.agent,
+            "task": ws.task,
+            "branch": ws.branch,
+            "started_ts": started,
+        }
+    )
 
     # Locks acquired during run to ensure release on failure if desired
     held_locks: List[str] = []
+    held_sticky: List[str] = []
 
     for i, step in enumerate(steps):
         stype = str(step.get("type") or "").strip().lower()
@@ -200,46 +229,73 @@ def run_workflow(
             record(i, stype, True, f"DRY RUN: {step}")
             continue
 
+        emit({"type": "step_start", "step_index": i, "step_type": stype, "step": step})
+
         try:
             if stype == "lock":
                 action = str(step.get("action") or "acquire").lower()
                 group = _fmt(str(step.get("group") or "").strip(), ctx)
-                ttl = int(step.get("ttl_sec") or 6*60*60)
+                ttl = int(step.get("ttl_sec") or 6 * 60 * 60)
                 force = bool(step.get("force") or False)
+                sticky = _eval_bool(step.get("sticky", False), ctx, default=False)
                 if not group:
                     raise WorkflowError("lock step requires group")
                 if action == "acquire":
-                    acquire_lock(root=root, cfg=cfg, group=group, agent=ws.agent, task=ws.task, ttl_sec=ttl, force=force)
+                    acquire_lock(
+                        root=root,
+                        cfg=cfg,
+                        group=group,
+                        agent=ws.agent,
+                        task=ws.task,
+                        ttl_sec=ttl,
+                        force=force,
+                        sticky=sticky,
+                        branch=ws.branch if sticky else None,
+                    )
                     held_locks.append(group)
-                    record(i, stype, True, f"acquired {group}")
+                    if sticky:
+                        held_sticky.append(group)
+                    record(i, stype, True, f"acquired {group}", sticky=sticky)
                 elif action == "release":
                     release_lock(root=root, cfg=cfg, group=group, agent=ws.agent, task=ws.task, force=force)
                     if group in held_locks:
                         held_locks.remove(group)
+                    if group in held_sticky:
+                        held_sticky.remove(group)
                     record(i, stype, True, f"released {group}")
                 else:
                     raise WorkflowError(f"Unknown lock action: {action}")
 
             elif stype == "harness":
-                which = str(step.get("step") or "").strip().lower()
-                if which not in ["setup", "check"]:
-                    raise WorkflowError("harness step requires step=setup|check")
-                run_harness_step(root, cfg, ws, step=which, extra_env=None)
-                record(i, stype, True, which)
+                name = str(step.get("name") or "check")
+                ok = run_harness_step(root=root, cfg=cfg, ws_path=ws_path, name=name, capture=False)
+                if not ok:
+                    raise WorkflowError(f"Harness step failed: {name}")
+                record(i, stype, True, f"harness {name} ok")
 
             elif stype == "agent":
-                role = str(step.get("role") or "implement").strip().lower()
-                provider = str(step.get("provider") or provider_default or cfg.default_provider).strip()
-                auto_commit = bool(step.get("auto_commit") if "auto_commit" in step else False)
-                auto_push = bool(step.get("auto_push") if "auto_push" in step else False)
+                role = str(step.get("role") or "implement")
+                provider = str(step.get("provider") or provider_default)
                 prompt = _read_prompt(step, root, ws_path, ctx)
-                run_agent_role(root, cfg, pol, ws, provider=provider, role=role, prompt=prompt, auto_commit=auto_commit, auto_push=auto_push)
-                record(i, stype, True, f"{role} via {provider}")
+                auto_commit = bool(step.get("auto_commit") if "auto_commit" in step else pol.allow_auto_commit)
+                auto_push = bool(step.get("auto_push") if "auto_push" in step else pol.allow_auto_push)
+                run_agent_role(
+                    root,
+                    cfg,
+                    pol,
+                    ws,
+                    provider=provider,
+                    role=role,
+                    prompt=prompt,
+                    auto_commit=auto_commit,
+                    auto_push=auto_push,
+                )
+                record(i, stype, True, f"agent role={role} provider={provider}")
 
             elif stype == "pr":
                 action = str(step.get("action") or "create").lower()
                 if action != "create":
-                    raise WorkflowError("Only pr action=create supported in v0.1")
+                    raise WorkflowError("Only pr action=create supported in v0.3")
                 title = _fmt(str(step.get("title") or f"[{ws.agent}] {ws.task}"), ctx)
                 body = _fmt(str(step.get("body") or "Automated by AgentForge."), ctx)
                 draft_raw = step.get("draft") if "draft" in step else True
@@ -248,20 +304,42 @@ def run_workflow(
                 created = create_pr(ws_path=ws_path, title=title, body=body, base=base_branch, head=ws.branch, draft=draft)
                 pr_url = created.url
                 ctx["pr_url"] = pr_url
-                record(i, stype, True, f"created {pr_url}")
+                ctx["pr_number"] = created.number
+
+                # Attach PR metadata to sticky locks (best-effort)
+                for g in list(held_sticky):
+                    try:
+                        mark_lock_sticky(
+                            root=root,
+                            cfg=cfg,
+                            group=g,
+                            agent=ws.agent,
+                            task=ws.task,
+                            sticky=True,
+                            pr_number=created.number,
+                            branch=ws.branch,
+                            force=False,
+                        )
+                    except Exception:
+                        # Don't fail a workflow if the lock disappeared or was stolen.
+                        pass
+
+                record(i, stype, True, f"created {pr_url}", pr_number=created.number)
 
             elif stype == "comment":
+                prn = step.get("pr_number")
+                # If not provided, infer from current branch.
+                pr_number = int(_fmt(str(prn), ctx)) if prn is not None else _get_pr_number(ws_path)
+                if not pr_number:
+                    raise WorkflowError("Could not determine PR number for comment step")
                 body = _fmt(str(step.get("body") or ""), ctx)
                 if not body:
-                    raise WorkflowError("comment step requires body")
-                prn = _get_pr_number(ws_path)
-                if prn is None:
-                    raise WorkflowError("No PR found for this branch (gh pr view failed).")
-                post_pr_comment(prn, body)
-                record(i, stype, True, "comment posted")
+                    body = "AgentForge: (empty comment)"
+                post_pr_comment(int(pr_number), body)
+                record(i, stype, True, f"commented on PR #{pr_number}")
 
             elif stype == "sleep":
-                sec = float(step.get("seconds") or 1)
+                sec = float(step.get("sec") or 1)
                 time.sleep(sec)
                 record(i, stype, True, f"slept {sec}s")
 
@@ -269,13 +347,42 @@ def run_workflow(
                 msg = _fmt(str(step.get("message") or ""), ctx)
                 record(i, stype, True, msg)
 
+            elif stype == "mcp_gateway":
+                # Optional: ensure an MCP Gateway is running (Docker MCP Toolkit).
+                action = str(step.get("action") or "ensure").lower()
+                scope = str(step.get("scope") or "workspace").lower()  # workspace | repo
+                transport = str(step.get("transport") or "").strip() or None
+                if action not in ["ensure", "start", "stop"]:
+                    raise WorkflowError(f"Unknown mcp_gateway action: {action}")
+
+                from .mcp import load_mcp_config, ensure_gateway_running, stop_gateway
+
+                mcfg = load_mcp_config(root)
+                if action in ["ensure", "start"]:
+                    key = None if scope == "repo" else f"{ws.agent}::{ws.task}"
+                    gw = ensure_gateway_running(root, cfg, mcfg, key=key, transport=transport)
+                    # Expose to downstream steps
+                    if gw.get("url"):
+                        ctx["mcp_gateway_url"] = gw["url"]
+                    if gw.get("auth_token"):
+                        ctx["mcp_gateway_auth_token"] = gw["auth_token"]
+                    ctx["mcp_profile"] = gw.get("profile") or mcfg.profile
+                    record(i, stype, True, f"gateway running ({gw.get('transport')})", url=gw.get("url"))
+                else:  # stop
+                    key = None if scope == "repo" else f"{ws.agent}::{ws.task}"
+                    stop_gateway(root, cfg, key=key)
+                    record(i, stype, True, "gateway stopped")
+
             else:
                 raise WorkflowError(f"Unknown step type: {stype}")
 
+        except LockTakenError as e:
+            record(i, stype, False, str(e), holder=e.holder.__dict__)
+            # Stop workflow; locks remain held (by someone else) anyway.
+            break
         except Exception as e:
             record(i, stype, False, str(e))
-            # Do not auto-release locks by default; users often prefer manual control.
-            # But we at least report held locks in the summary.
+            # Stop workflow on first failure. (Workflows can model retries explicitly.)
             break
 
     finished = int(time.time())
@@ -288,6 +395,8 @@ def run_workflow(
         results=results,
         pr_url=pr_url,
     )
+
+    emit({"type": "workflow_end", "workflow": workflow, "agent": ws.agent, "task": ws.task, "finished_ts": finished, "pr_url": pr_url})
 
     if log_json:
         ensure_dir(logs_dir)
