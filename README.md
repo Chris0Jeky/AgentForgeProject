@@ -112,7 +112,7 @@ See docs for the security tradeoffs and recommended “wake-only” setups.
 
 ---
 
-## Dashboard
+## Dashboard (UI)
 
 Read-only local dashboard:
 
@@ -121,7 +121,21 @@ agentforge serve
 # open http://127.0.0.1:5179/
 ```
 
----
+Actions-enabled UI (workspace spawning, locks, workflow runs):
+
+```bash
+agentforge ui
+# prints a URL with a token:
+#   http://127.0.0.1:5179/?token=...
+```
+
+MCP management (optional, via Docker MCP Toolkit):
+
+```bash
+agentforge mcp status
+agentforge mcp catalog --filter playwright
+agentforge mcp sync
+```
 
 ## Docs
 
