@@ -154,7 +154,15 @@ def run_bootstrap(
     if not event_cb:
         print_preflight(status)
     else:
-        emit({"type": "preflight", "status": status.__dict__})
+        status_items: List[Dict[str, Any]] = []
+        for s in status:
+            if isinstance(s, dict):
+                status_items.append(dict(s))
+            elif hasattr(s, "__dict__"):
+                status_items.append(dict(getattr(s, "__dict__")))
+            else:
+                status_items.append({"value": str(s)})
+        emit({"type": "preflight", "status": status_items})
 
     st_file, _ = state_paths(root, cfg)
 
