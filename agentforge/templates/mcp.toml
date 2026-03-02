@@ -1,0 +1,24 @@
+# AgentForge MCP config (optional)
+#
+# This file is used by:
+# - `agentforge mcp ...` commands
+# - AgentForge local UI (MCP tab)
+#
+# Current backend implemented by AgentForge: Docker MCP Toolkit / docker-mcp plugin.
+# Docs:
+#   https://docs.docker.com/ai/mcp-catalog-and-toolkit/cli/
+
+backend = "docker"
+
+# The default Docker catalog reference:
+catalog_ref = "mcp/docker-mcp-catalog"
+
+# Profile name used to group servers for this repo.
+profile = "agentforge"
+
+# Servers you want installed/enabled for this profile.
+# These are *server IDs* from: `docker mcp catalog server ls mcp/docker-mcp-catalog`
+servers = [
+  "github-official",
+  "playwright",
+]
