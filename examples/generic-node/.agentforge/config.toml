@@ -1,0 +1,8 @@
+repo = ""
+default_base_ref = "origin/main"
+worktrees_dir = ".worktrees"
+
+harness_setup = ["npm ci"]
+harness_check = ["npm test", "npm run lint", "npm run build"]
+
+default_provider = "codex_cli"
