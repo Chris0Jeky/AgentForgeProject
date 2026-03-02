@@ -48,6 +48,9 @@ Thumbs.db
 .agentforge/state/
 .agentforge/logs/
 .agentforge/cache/
+.agentforge/logs/runs/
+.agentforge/state/locks/
+.agentforge/state/mcp_gateways.json
 
 # Node artifacts (optional harness use)
 node_modules/
