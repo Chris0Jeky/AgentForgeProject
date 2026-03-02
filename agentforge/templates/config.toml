@@ -46,6 +46,13 @@ default_workflow = "default"
 # Options: none | labels | keywords | labels_then_keywords
 auto_lock_strategy = "labels_then_keywords"
 
+# Sticky lock maintenance (optional)
+# If you use sticky=true in a workflow lock step, AgentForge can renew that lock
+# and auto-release it when the PR is merged/closed.
+lock_renew_interval_sec = 120
+sticky_lock_default_ttl_sec = 21600
+sticky_lock_auto_release = true
+
 # PR comment poll interval (seconds)
 poll_interval_sec = 45
 
