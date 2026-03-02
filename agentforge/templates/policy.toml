@@ -15,16 +15,20 @@ allowed_comment_authors = [
 # Safer default for automation:
 deny_forks = true
 
-# Optional: hard forbid these paths from being changed by automation:
+# Paths automation must never modify:
 forbid_globs = [
-  # ".github/workflows/**",
   # ".agentforge/**",
 ]
 
-# Optional: allow changes but trip a "manual review required" gate
+# Paths that are sensitive. You choose how to treat them with protect_behavior.
 protect_globs = [
-  # "scripts/**",
+  ".github/workflows/**",
 ]
+
+# What to do if a protected path changes:
+#   - "warn": allow but emit warnings (smoother)
+#   - "halt": stop automation (safer)
+protect_behavior = "warn"
 
 # Automation risk threshold heuristics:
 max_changed_lines = 4000
