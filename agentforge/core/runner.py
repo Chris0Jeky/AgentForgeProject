@@ -11,6 +11,7 @@ from .diffscan import scan_diff, git_diff_text, changed_files, numstat_total_cha
 from .guardrails import evaluate_policy_globs
 from .utils import out, run
 from agentforge.providers import get_provider
+from .mcp import load_mcp_config, ensure_gateway_running
 
 def _load_env(ws_path: Path) -> Dict[str, str]:
     env: Dict[str, str] = {}
@@ -43,6 +44,35 @@ def run_agent_role(root: Path, cfg: RepoConfig, pol: Policy, ws: Workspace, *, p
     env = os.environ.copy()
     env.update(_load_env(ws_path))
 
+    # Optional: MCP Gateway sidecar (Docker MCP Toolkit).
+    mcp_hint = ""
+    try:
+        mcfg = load_mcp_config(root)
+        if mcfg.gateway_auto_start:
+            gw_key = f"{ws.agent}::{ws.task}" if mcfg.gateway_per_workspace else None
+            gw = ensure_gateway_running(root, cfg, mcfg, key=gw_key)
+            if gw.get("url"):
+                env["AGENTFORGE_MCP_GATEWAY_URL"] = str(gw["url"])
+                env.setdefault("MCP_GATEWAY_URL", str(gw["url"]))
+            if gw.get("auth_token"):
+                env["AGENTFORGE_MCP_GATEWAY_AUTH_TOKEN"] = str(gw["auth_token"])
+                # Some clients may look for this name.
+                env.setdefault("MCP_GATEWAY_AUTH_TOKEN", str(gw["auth_token"]))
+            env["AGENTFORGE_MCP_PROFILE"] = str(gw.get("profile") or mcfg.profile)
+            env["AGENTFORGE_MCP_TRANSPORT"] = str(gw.get("transport") or mcfg.gateway_transport)
+            if mcfg.gateway_inject_prompt:
+                mcp_hint = (
+                    "\n\n[MCP]\n"
+                    "A Docker MCP Gateway is available for tool calls.\n"
+                    f"URL: {gw.get('url','')}\n"
+                    f"AUTH_TOKEN: {gw.get('auth_token','')}\n"
+                    f"PROFILE: {gw.get('profile') or mcfg.profile}\n"
+                    f"TRANSPORT: {gw.get('transport') or mcfg.gateway_transport}\n"
+                )
+    except Exception:
+        # MCP is optional; ignore errors by default.
+        mcp_hint = ""
+
     # Role-specific prompt framing (minimal; extend in your project)
     if role == "review":
         diff = git_diff_text(ws_path, base_ref=cfg.default_base_ref)
@@ -71,6 +101,9 @@ def run_agent_role(root: Path, cfg: RepoConfig, pol: Policy, ws: Workspace, *, p
             "After changes, run harness checks and ensure green.\n\n"
             f"TASK:\n{prompt}\n"
         )
+
+    if mcp_hint:
+        prompt += mcp_hint
 
     res = prov.run(prompt=prompt, cwd=ws_path, env=env)
     if not res.ok:
