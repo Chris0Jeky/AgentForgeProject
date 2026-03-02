@@ -1,0 +1,63 @@
+# AgentForge workflows (repo-local)
+#
+# You can define multiple workflows and select them:
+#   agentforge workflow run --workflow default --agent a1 --task issue-123
+#
+# Step types (v0.1):
+# - lock:    {type="lock", action="acquire|release", group="backend", ttl_sec=3600, force=false}
+# - harness: {type="harness", step="setup|check"}
+# - agent:   {type="agent", role="implement|fix|review|qa", provider="codex_cli", prompt="...", prompt_file="path", auto_commit=true, auto_push=true}
+# - pr:      {type="pr", action="create", draft=true, title="...", body="...", base="main"}
+# - comment: {type="comment", body="..."}  # requires PR to exist
+# - sleep:   {type="sleep", seconds=3}
+# - note:    {type="note", message="..."}
+#
+# Template variables available in strings:
+# Always:
+#   {agent} {task} {branch} {port} {workspace} {workflow} {base_ref}
+#
+# When running via `agentforge bootstrap` (GitHub issue context is injected):
+#   {issue_number} {issue_title} {issue_url} {issue_labels} {issue_body}
+#   {lock_group}  (selected via .agentforge/locks.toml + config.auto_lock_strategy)
+#
+# Optional "feature flags" in context (defaults are set by the runner; bootstrap can override):
+#   {create_prs} (default true)
+#   {draft_prs}  (default true)
+
+[workflow.default]
+steps = [
+  { type="note", message="Starting '{workflow}' for {agent}:{task} (lock={lock_group})" },
+  { type="lock", action="acquire", group="{lock_group}", ttl_sec=14400 },
+  { type="agent", role="implement", provider="codex_cli", auto_commit=true, auto_push=true, prompt_file=".agentforge/prompts/issue_implement.md" },
+  { type="harness", step="check" },
+  { type="pr", action="create", enabled="{create_prs}", draft="{draft_prs}", title="[{agent}] {issue_title} (#{issue_number})", body="Automated by AgentForge.\n\nCloses #{issue_number}\n\nBranch: {branch}\nWorkflow: {workflow}\nLock: {lock_group}" },
+  { type="lock", action="release", group="{lock_group}" },
+  { type="note", message="Done." },
+]
+
+[workflow.frontend]
+steps = [
+  { type="lock", action="acquire", group="frontend", ttl_sec=14400 },
+  { type="agent", role="implement", provider="codex_cli", auto_commit=true, auto_push=true, prompt_file=".agentforge/prompts/issue_implement.md" },
+  { type="harness", step="check" },
+  { type="pr", action="create", enabled="{create_prs}", draft="{draft_prs}", title="[{agent}] {issue_title} (FE) (#{issue_number})", body="Automated by AgentForge.\n\nCloses #{issue_number}\n\nLock: frontend" },
+  { type="lock", action="release", group="frontend" },
+]
+
+[workflow.backend]
+steps = [
+  { type="lock", action="acquire", group="backend", ttl_sec=14400 },
+  { type="agent", role="implement", provider="codex_cli", auto_commit=true, auto_push=true, prompt_file=".agentforge/prompts/issue_implement.md" },
+  { type="harness", step="check" },
+  { type="pr", action="create", enabled="{create_prs}", draft="{draft_prs}", title="[{agent}] {issue_title} (BE) (#{issue_number})", body="Automated by AgentForge.\n\nCloses #{issue_number}\n\nLock: backend" },
+  { type="lock", action="release", group="backend" },
+]
+
+[workflow.docs]
+steps = [
+  { type="lock", action="acquire", group="docs", ttl_sec=7200 },
+  { type="agent", role="implement", provider="codex_cli", auto_commit=true, auto_push=true, prompt_file=".agentforge/prompts/issue_implement.md" },
+  { type="harness", step="check" },
+  { type="pr", action="create", enabled="{create_prs}", draft="{draft_prs}", title="[{agent}] {issue_title} (docs) (#{issue_number})", body="Automated by AgentForge.\n\nCloses #{issue_number}\n\nLock: docs" },
+  { type="lock", action="release", group="docs" },
+]
