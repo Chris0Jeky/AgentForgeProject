@@ -1,0 +1,28 @@
+# Example config tuned for Taskdeck-like repos
+
+repo = "Chris0Jeky/Taskdeck"
+default_base_ref = "origin/main"
+worktrees_dir = ".worktrees"
+
+port_start = 8081
+port_end = 8180
+
+compose_file = "deploy/docker-compose.yml"
+compose_profile = "baseline"
+compose_project_prefix = "td"
+
+harness_setup = [
+  "dotnet restore backend/Taskdeck.sln",
+  "cd frontend/taskdeck-web && npm install",
+]
+
+harness_check = [
+  "dotnet test backend/Taskdeck.sln -c Release -m:1",
+  "cd frontend/taskdeck-web && npm run lint",
+  "cd frontend/taskdeck-web && npm run test:coverage",
+  "cd frontend/taskdeck-web && npm run typecheck",
+  "cd frontend/taskdeck-web && npm run build",
+]
+
+default_provider = "codex_cli"
+poll_interval_sec = 45
