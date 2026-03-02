@@ -1,1 +1,56 @@
-/.idea
+﻿# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python packaging/build
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Shell/editor artifacts
+*.swp
+*.swo
+*~
+.bash_history
+.zsh_history
+.history
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# AgentForge runtime artifacts
+.worktrees/
+.agentforge/state/
+.agentforge/logs/
+.agentforge/cache/
+
+# Node artifacts (optional harness use)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
