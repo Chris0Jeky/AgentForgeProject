@@ -49,6 +49,13 @@ class RepoConfig:
     default_workflow: str = "default"
     auto_lock_strategy: str = "labels_then_keywords"
 
+    # Sticky lock maintenance (optional)
+    # If you use sticky locks in workflows, the daemon can renew them and
+    # auto-release after PR merge/close.
+    lock_renew_interval_sec: int = 120
+    sticky_lock_default_ttl_sec: int = 6 * 60 * 60
+    sticky_lock_auto_release: bool = True
+
     # GitHub poll interval
     poll_interval_sec: int = 45
 
@@ -139,6 +146,9 @@ def load_repo_config(root: Path) -> Tuple[RepoConfig, Policy]:
         default_provider=get(cfg_data, "default_provider", "codex_cli"),
         default_workflow=get(cfg_data, "default_workflow", "default"),
         auto_lock_strategy=get(cfg_data, "auto_lock_strategy", "labels_then_keywords"),
+        lock_renew_interval_sec=int(get(cfg_data, "lock_renew_interval_sec", 120)),
+        sticky_lock_default_ttl_sec=int(get(cfg_data, "sticky_lock_default_ttl_sec", 6 * 60 * 60)),
+        sticky_lock_auto_release=bool(get(cfg_data, "sticky_lock_auto_release", True)),
         poll_interval_sec=int(get(cfg_data, "poll_interval_sec", 45)),
         queue_label=get(cfg_data, "queue_label", "agent:queued"),
         in_progress_label=get(cfg_data, "in_progress_label", "agent:in-progress"),
