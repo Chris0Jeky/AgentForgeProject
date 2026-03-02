@@ -1,6 +1,6 @@
 [project]
 name = "agentforge"
-version = "0.1.0"
+version = "0.2.0"
 description = "A self-contained, local-first agent orchestrator built around git worktrees."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,3 +30,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agentforge*"]
+
+
+[project.entry-points."agentforge.providers"]
+# External provider plugins can register here.
+# Example:
+# claude = "agentforge_claude:provider"
