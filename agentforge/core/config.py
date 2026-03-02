@@ -11,6 +11,7 @@ except Exception:  # pragma: no cover
 
 from .utils import out
 
+
 @dataclass(frozen=True)
 class RepoConfig:
     # Repo identity (optional but used for gh integration)
@@ -43,8 +44,10 @@ class RepoConfig:
     harness_setup: List[str] = None  # type: ignore
     harness_check: List[str] = None  # type: ignore
 
-    # Provider defaults
+    # Provider + workflow defaults
     default_provider: str = "codex_cli"
+    default_workflow: str = "default"
+    auto_lock_strategy: str = "labels_then_keywords"
 
     # GitHub poll interval
     poll_interval_sec: int = 45
@@ -53,6 +56,7 @@ class RepoConfig:
     queue_label: str = "agent:queued"
     in_progress_label: str = "agent:in-progress"
     done_label: str = "agent:done"
+
 
 @dataclass(frozen=True)
 class Policy:
@@ -63,7 +67,7 @@ class Policy:
     # Path policy
     forbid_globs: List[str] = None  # type: ignore
     protect_globs: List[str] = None  # type: ignore
-    protect_behavior: str = "warn"   # warn | halt
+    protect_behavior: str = "warn"  # warn | halt
 
     # Diff size heuristic
     max_changed_lines: int = 4000
@@ -73,7 +77,8 @@ class Policy:
     allow_auto_push: bool = True
     allow_auto_commit: bool = True
 
-def find_repo_root(start: Optional[Path]=None) -> Path:
+
+def find_repo_root(start: Optional[Path] = None) -> Path:
     start = start or Path.cwd()
     # Prefer git, but fall back to walking up
     try:
@@ -89,10 +94,12 @@ def find_repo_root(start: Optional[Path]=None) -> Path:
             p = p.parent
     raise SystemExit("Not inside a git repository (no .git found and git rev-parse failed).")
 
+
 def _load_toml(path: Path) -> Dict[str, Any]:
     if tomllib is None:
         raise SystemExit("Python 3.11+ required for tomllib.")
     return tomllib.loads(path.read_text(encoding="utf-8"))
+
 
 def load_repo_config(root: Path) -> Tuple[RepoConfig, Policy]:
     cfg_path = root / ".agentforge" / "config.toml"
@@ -130,6 +137,8 @@ def load_repo_config(root: Path) -> Tuple[RepoConfig, Policy]:
         harness_setup=list(get(cfg_data, "harness_setup", [])),
         harness_check=list(get(cfg_data, "harness_check", [])),
         default_provider=get(cfg_data, "default_provider", "codex_cli"),
+        default_workflow=get(cfg_data, "default_workflow", "default"),
+        auto_lock_strategy=get(cfg_data, "auto_lock_strategy", "labels_then_keywords"),
         poll_interval_sec=int(get(cfg_data, "poll_interval_sec", 45)),
         queue_label=get(cfg_data, "queue_label", "agent:queued"),
         in_progress_label=get(cfg_data, "in_progress_label", "agent:in-progress"),
