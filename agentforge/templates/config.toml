@@ -1,0 +1,39 @@
+# AgentForge repo config (commit this file)
+
+# Optional: enable GitHub automation by setting owner/repo.
+# Example: repo = "Chris0Jeky/Taskdeck"
+repo = ""
+
+default_base_ref = "origin/main"
+worktrees_dir = ".worktrees"
+
+# State/log/cache dirs (recommend leaving defaults)
+state_dir = ".agentforge/state"
+logs_dir = ".agentforge/logs"
+cache_dir = ".agentforge/cache"
+
+# Port pool for per-agent stacks (optional)
+port_start = 8081
+port_end   = 8180
+
+# Optional Docker Compose integration for your project:
+# compose_file = "deploy/docker-compose.yml"
+# compose_profile = "baseline"
+compose_file = ""
+compose_profile = ""
+compose_project_prefix = "af"
+
+# Harness commands (project-specific)
+# Use bash -lc to run; keep commands idempotent.
+harness_setup = [
+  # "npm ci",
+]
+harness_check = [
+  # "npm test",
+]
+
+# Default provider adapter
+default_provider = "codex_cli"
+
+# PR comment poll interval (seconds)
+poll_interval_sec = 45
