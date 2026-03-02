@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-from typing import List
-
 from .config import Policy
 
 def is_allowed_commenter(pol: Policy, github_login: str) -> bool:
@@ -16,5 +13,6 @@ def policy_summary(pol: Policy) -> str:
         f"Deny forks: {pol.deny_forks}\n"
         f"Auto-commit: {pol.allow_auto_commit}  Auto-push: {pol.allow_auto_push}\n"
         f"Require harness check: {pol.require_harness_check}\n"
-        f"Max changed lines: {pol.max_changed_lines}"
+        f"Max changed lines: {pol.max_changed_lines}\n"
+        f"Protect behavior: {pol.protect_behavior}"
     )

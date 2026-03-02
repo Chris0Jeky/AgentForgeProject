@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .utils import which, out, run
+from .utils import which, out
 
 class GhMissing(RuntimeError):
     pass
