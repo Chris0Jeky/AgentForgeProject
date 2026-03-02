@@ -4,9 +4,9 @@ import json
 import os
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 try:
     import tomllib  # py3.11+
@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover
     tomllib = None
 
 from .guardrails import sanitize_id
-from .utils import ensure_dir
+from .utils import ensure_dir, atomic_write_text
 
 
 class LockError(RuntimeError):
@@ -37,6 +37,17 @@ class LockInfo:
     pid: int
     created_ts: int
     expires_ts: int
+    ttl_sec: int = 0
+
+    # Sticky locks are intended to live beyond a single workflow run.
+    # They can be renewed by the daemon, and auto-released when PR merges.
+    sticky: bool = False
+    pr_number: Optional[int] = None
+    branch: Optional[str] = None
+    last_renew_ts: int = 0
+
+    # Free-form extra metadata (non-security-critical)
+    meta: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -85,7 +96,8 @@ def _lock_dir(root: Path, cfg) -> Path:
 
 
 def _lock_path(root: Path, cfg, group: str) -> Path:
-    return _lock_dir(root, cfg) / f"{sanitize_id(group)}.lock.json"
+    safe = sanitize_id(group)
+    return _lock_dir(root, cfg) / f"{safe}.lock.json"
 
 
 def _read_lock(path: Path) -> Optional[LockInfo]:
@@ -94,29 +106,42 @@ def _read_lock(path: Path) -> Optional[LockInfo]:
     try:
         j = json.loads(path.read_text(encoding="utf-8"))
         return LockInfo(
-            group=j.get("group", ""),
-            agent=j.get("agent", ""),
-            task=j.get("task", ""),
-            hostname=j.get("hostname", ""),
-            pid=int(j.get("pid", 0)),
-            created_ts=int(j.get("created_ts", 0)),
-            expires_ts=int(j.get("expires_ts", 0)),
+            group=str(j.get("group") or ""),
+            agent=str(j.get("agent") or ""),
+            task=str(j.get("task") or ""),
+            hostname=str(j.get("hostname") or ""),
+            pid=int(j.get("pid") or 0),
+            created_ts=int(j.get("created_ts") or 0),
+            expires_ts=int(j.get("expires_ts") or 0),
+            ttl_sec=int(j.get("ttl_sec") or j.get("ttl") or 0),
+            sticky=bool(j.get("sticky") or False),
+            pr_number=int(j["pr_number"]) if j.get("pr_number") is not None else None,
+            branch=str(j.get("branch")) if j.get("branch") is not None else None,
+            last_renew_ts=int(j.get("last_renew_ts") or 0),
+            meta=dict(j.get("meta") or {}) if isinstance(j.get("meta"), dict) else None,
         )
     except Exception:
         return None
 
 
-def _write_lock_atomic(path: Path, info: LockInfo) -> None:
-    # Atomic lock acquisition via exclusive create
-    fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    try:
-        os.write(fd, json.dumps(info.__dict__, indent=2, sort_keys=True).encode("utf-8"))
-    finally:
-        os.close(fd)
+def _write_lock_create_exclusive(path: Path, info: LockInfo) -> None:
+    ensure_dir(path.parent)
+    raw = json.dumps(info.__dict__, indent=2)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(raw)
+
+
+def _write_lock_replace(path: Path, info: LockInfo) -> None:
+    ensure_dir(path.parent)
+    raw = json.dumps(info.__dict__, indent=2)
+    atomic_write_text(path, raw)
 
 
 def is_expired(info: LockInfo) -> bool:
-    return info.expires_ts > 0 and _now() > info.expires_ts
+    if not info.expires_ts:
+        return False
+    return _now() > int(info.expires_ts)
 
 
 def acquire_lock(
@@ -128,65 +153,75 @@ def acquire_lock(
     task: str,
     ttl_sec: int = 6 * 60 * 60,
     force: bool = False,
-    steal_expired: bool = True,
+    sticky: bool = False,
+    branch: Optional[str] = None,
+    pr_number: Optional[int] = None,
+    meta: Optional[Dict[str, Any]] = None,
 ) -> LockInfo:
-    """Acquire an exclusive lock for `group`.
+    """Acquire an exclusive lock for a subsystem.
 
-    Implementation notes:
-    - Uses a lock file in `.agentforge/state/locks/`.
-    - Acquisition is atomic via O_EXCL create.
-    - If lock exists:
-      - if expired and steal_expired: can steal (without requiring --force)
-      - else raises LockTakenError unless force=True (force steals immediately)
-
-    Security note:
-    - This is a local coordination primitive, not a security boundary.
+    Notes:
+    - Locks are local to a repo checkout (not distributed).
+    - If an existing lock is expired, it may be replaced without --force.
+    - If the lock is already held by the same agent/task, it is treated as a renewal.
     """
-    group_id = sanitize_id(group)
-    d = _lock_dir(root, cfg)
-    ensure_dir(d)
-    path = _lock_path(root, cfg, group_id)
+    group = group.strip()
+    if not group:
+        raise LockError("group is required")
+    path = _lock_path(root, cfg, group)
 
-    hostname = socket.gethostname()
-    pid = os.getpid()
-    created = _now()
-    expires = created + int(ttl_sec) if ttl_sec > 0 else 0
-    info = LockInfo(group=group_id, agent=agent, task=task, hostname=hostname, pid=pid, created_ts=created, expires_ts=expires)
+    now = _now()
+    ttl_sec = int(ttl_sec or 0)
+    if ttl_sec <= 0:
+        ttl_sec = 6 * 60 * 60
 
-    # Fast path: no file yet
+    info_new = LockInfo(
+        group=group,
+        agent=agent,
+        task=task,
+        hostname=socket.gethostname(),
+        pid=os.getpid(),
+        created_ts=now,
+        expires_ts=now + ttl_sec,
+        ttl_sec=ttl_sec,
+        sticky=bool(sticky),
+        pr_number=int(pr_number) if pr_number is not None else None,
+        branch=branch,
+        last_renew_ts=now,
+        meta=meta,
+    )
+
+    # Fast path: create exclusively
     try:
-        _write_lock_atomic(path, info)
-        return info
+        _write_lock_create_exclusive(path, info_new)
+        return info_new
     except FileExistsError:
-        holder = _read_lock(path)
-        if holder is None:
-            # Unknown contents -> force required
-            if not force:
-                raise LockError(f"Lock '{group_id}' exists but is unreadable; use --force to steal: {path}")
-        else:
-            if not force:
-                if is_expired(holder) and steal_expired:
-                    # Allow stealing expired without explicit --force
-                    pass
-                else:
-                    raise LockTakenError(group_id, holder)
+        pass
 
-        # Steal: move old lock aside, then retry atomic create
-        stale = path.with_suffix(f".stale.{_now()}.json")
-        try:
-            path.replace(stale)
-        except Exception:
-            # If replace fails, force-remove
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
+    # Existing: read and decide
+    holder = _read_lock(path)
+    if holder is None:
+        # Corrupt file -> allow replace if force
+        if not force:
+            raise LockError(f"Lock file exists but could not be parsed: {path}. Use --force to replace.")
+        _write_lock_replace(path, info_new)
+        return info_new
 
-        _write_lock_atomic(path, info)
-        return info
+    # Renewal by same owner
+    if holder.agent == agent and holder.task == task and not is_expired(holder) and not force:
+        renewed = replace(holder, expires_ts=now + ttl_sec, ttl_sec=ttl_sec, last_renew_ts=now)
+        _write_lock_replace(path, renewed)
+        return renewed
+
+    if not is_expired(holder) and not force:
+        raise LockTakenError(group, holder)
+
+    # Replace stale lock (expired) or force steal
+    _write_lock_replace(path, info_new)
+    return info_new
 
 
-def release_lock(
+def update_lock(
     *,
     root: Path,
     cfg,
@@ -194,80 +229,153 @@ def release_lock(
     agent: Optional[str] = None,
     task: Optional[str] = None,
     force: bool = False,
-) -> None:
-    """Release lock.
-
-    If agent/task provided and force=False, only releases if it matches owner.
-    """
+    patch: Dict[str, Any],
+) -> LockInfo:
+    """Update fields of an existing lock, optionally verifying ownership."""
     path = _lock_path(root, cfg, group)
-    if not path.exists():
-        return
     holder = _read_lock(path)
-    if holder and not force and agent and task:
-        if holder.agent != agent or holder.task != task:
+    if holder is None:
+        raise LockError(f"Lock '{group}' not found")
+    if not force:
+        if agent and holder.agent != agent:
+            raise LockError(f"Lock '{group}' owned by {holder.agent}:{holder.task}, not {agent}:{task or ''}")
+        if task and holder.task != task:
+            raise LockError(f"Lock '{group}' owned by {holder.agent}:{holder.task}, not {agent or ''}:{task}")
+    # Build a new LockInfo using dataclass replace where possible.
+    upd = dict(patch or {})
+    # Merge meta dict if provided
+    meta = holder.meta
+    if "meta" in upd and isinstance(upd["meta"], dict):
+        meta = dict(meta or {})
+        meta.update(upd["meta"])
+        upd["meta"] = meta
+
+    # Normalize certain fields
+    if "pr_number" in upd and upd["pr_number"] is not None:
+        try:
+            upd["pr_number"] = int(upd["pr_number"])
+        except Exception:
+            upd["pr_number"] = None
+    if "ttl_sec" in upd and upd["ttl_sec"] is not None:
+        upd["ttl_sec"] = int(upd["ttl_sec"])
+
+    new = replace(holder, **upd)
+    _write_lock_replace(path, new)
+    return new
+
+
+def renew_lock(
+    *,
+    root: Path,
+    cfg,
+    group: str,
+    ttl_sec: Optional[int] = None,
+    agent: Optional[str] = None,
+    task: Optional[str] = None,
+    force: bool = False,
+) -> LockInfo:
+    """Extend the lock expiry.
+
+    If ttl_sec is None, keep existing ttl_sec (or 6h fallback).
+    """
+    now = _now()
+    holder = _read_lock(_lock_path(root, cfg, group))
+    if holder is None:
+        raise LockError(f"Lock '{group}' not found")
+    ttl = int(ttl_sec if ttl_sec is not None else (holder.ttl_sec or 6 * 60 * 60))
+    return update_lock(
+        root=root,
+        cfg=cfg,
+        group=group,
+        agent=agent,
+        task=task,
+        force=force,
+        patch={
+            "ttl_sec": ttl,
+            "expires_ts": now + ttl,
+            "last_renew_ts": now,
+        },
+    )
+
+
+def mark_lock_sticky(
+    *,
+    root: Path,
+    cfg,
+    group: str,
+    agent: Optional[str] = None,
+    task: Optional[str] = None,
+    sticky: bool = True,
+    pr_number: Optional[int] = None,
+    branch: Optional[str] = None,
+    force: bool = False,
+) -> LockInfo:
+    patch: Dict[str, Any] = {"sticky": bool(sticky)}
+    if pr_number is not None:
+        patch["pr_number"] = int(pr_number)
+    if branch is not None:
+        patch["branch"] = branch
+    return update_lock(root=root, cfg=cfg, group=group, agent=agent, task=task, force=force, patch=patch)
+
+
+def release_lock(*, root: Path, cfg, group: str, agent: Optional[str]=None, task: Optional[str]=None, force: bool=False) -> None:
+    group = group.strip()
+    if not group:
+        raise LockError("group is required")
+    path = _lock_path(root, cfg, group)
+    holder = _read_lock(path)
+    if holder is None:
+        return
+    if not force:
+        # Mirror acquire semantics: mismatched owner raises LockTakenError for ergonomics.
+        if agent and holder.agent != agent:
             raise LockTakenError(group, holder)
-    path.unlink(missing_ok=True)
-
-
+        if task and holder.task != task:
+            raise LockTakenError(group, holder)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
 def list_locks(*, root: Path, cfg) -> List[LockInfo]:
     d = _lock_dir(root, cfg)
     if not d.exists():
         return []
-    locks: List[LockInfo] = []
+    out_locks: List[LockInfo] = []
     for p in d.glob("*.lock.json"):
-        info = _read_lock(p)
-        if info:
-            locks.append(info)
-    locks.sort(key=lambda x: x.group)
-    return locks
+        li = _read_lock(p)
+        if li:
+            out_locks.append(li)
+    # newest first
+    out_locks.sort(key=lambda x: x.created_ts, reverse=True)
+    return out_locks
 
 
 def load_lock_groups(root: Path) -> LockGroups:
-    """Load `.agentforge/locks.toml` (metadata) if present; else empty.
-
-    Schema (v0.2; backward compatible with v0.1):
-      [groups.<name>]
-      globs = ["frontend/**"]
-      labels = ["area:frontend", "frontend"]
-      keywords = ["ui", "web"]
-      workflow = "frontend"
-      priority = 50
-      default = false
-
-    Only `globs` is required; everything else is optional.
-    """
-    cfg_path = root / ".agentforge" / "locks.toml"
-    if not cfg_path.exists():
+    """Load .agentforge/locks.toml."""
+    af = root / ".agentforge"
+    p = af / "locks.toml"
+    if not p.exists():
         return LockGroups(groups={})
+
     if tomllib is None:
-        raise SystemExit("Python 3.11+ required for tomllib.")
+        raise SystemExit("Python 3.11+ required for tomllib")
 
-    data = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
-    raw_groups = data.get("groups") or {}
-
+    j = tomllib.loads(p.read_text(encoding="utf-8")) or {}
+    groups_raw = j.get("groups") or {}
     groups: Dict[str, LockGroupSpec] = {}
-    for k, v in raw_groups.items():
-        spec = v or {}
-        name = str(k)
-        globs = [str(g) for g in list(spec.get("globs") or [])]
-        labels = [str(x) for x in list(spec.get("labels") or [])]
-        keywords = [str(x) for x in list(spec.get("keywords") or [])]
-        workflow = spec.get("workflow", None) or None
-        try:
-            priority = int(spec.get("priority", 0))
-        except Exception:
-            priority = 0
-        default = bool(spec.get("default", False))
-        groups[name] = LockGroupSpec(
-            name=name,
-            globs=globs,
-            labels=labels,
-            keywords=keywords,
-            workflow=str(workflow) if workflow else None,
-            priority=priority,
-            default=default,
-        )
-
+    if isinstance(groups_raw, dict):
+        for name, spec in groups_raw.items():
+            if not isinstance(spec, dict):
+                continue
+            groups[str(name)] = LockGroupSpec(
+                name=str(name),
+                globs=list(spec.get("globs") or []),
+                labels=list(spec.get("labels") or []),
+                keywords=list(spec.get("keywords") or []),
+                workflow=str(spec.get("workflow")) if spec.get("workflow") not in [None, ""] else None,
+                priority=int(spec.get("priority") or 0),
+                default=bool(spec.get("default") or False),
+            )
     return LockGroups(groups=groups)
 
 
