@@ -1,0 +1,57 @@
+# AgentForge MCP config (optional)
+#
+# This file is used by:
+# - `agentforge mcp ...` commands
+# - AgentForge local UI (MCP tab)
+#
+# Current backend implemented by AgentForge: Docker MCP Toolkit / docker-mcp plugin.
+# Docs:
+#   https://docs.docker.com/ai/mcp-catalog-and-toolkit/cli/
+
+backend = "docker"
+
+# The default Docker catalog reference:
+catalog_ref = "mcp/docker-mcp-catalog"
+
+# Profile name used to group servers for this repo.
+profile = "agentforge"
+
+# Servers you want installed/enabled for this profile.
+# These are *server IDs* from: `docker mcp catalog server ls mcp/docker-mcp-catalog`
+servers = [
+  "github-official",
+  "playwright",
+]
+
+
+# Optional gateway settings (only used if you want AgentForge to manage a local gateway process).
+# Note: Docker Desktop MCP Toolkit may already run a gateway for you.
+[gateway]
+# Start/ensure a gateway automatically when running agent roles (runner integration).
+auto_start = false
+
+# If true, AgentForge will append gateway connection info to the agent prompt.
+inject_prompt = true
+
+# One of: "sse", "streaming", "stdio"
+# (stdio cannot be managed as a background process)
+transport = "sse"
+
+# Port range for gateway instances.
+port_start = 9360
+port_end = 9460
+
+# If true, start a distinct gateway per workspace key (agent::task); else use one global gateway.
+per_workspace = true
+
+# Gateway flags
+log_calls = false
+watch = true
+long_lived = false
+verify_signatures = false
+
+# If true, call `docker mcp profile ...` sync before starting the gateway.
+auto_sync = true
+
+# Bind host for the gateway HTTP transport.
+bind_host = "127.0.0.1"
