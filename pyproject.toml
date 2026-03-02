@@ -1,0 +1,32 @@
+[project]
+name = "agentforge"
+version = "0.1.0"
+description = "A self-contained, local-first agent orchestrator built around git worktrees."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+authors = [{name="AgentForge contributors"}]
+keywords = ["agents", "git", "worktree", "automation", "orchestration", "devtools"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+dependencies = []
+
+[project.scripts]
+agentforge = "agentforge.cli:main"
+af = "agentforge.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agentforge*"]
