@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,7 +16,12 @@ class RepoConfig:
     # Repo identity (optional but used for gh integration)
     repo: Optional[str] = None  # "owner/name"
 
+    # Git defaults
+    default_remote: str = "origin"
+    default_base_branch: str = "main"
     default_base_ref: str = "origin/main"
+
+    # Worktree layout
     worktrees_dir: str = ".worktrees"
 
     # AgentForge state dirs (inside repo)
@@ -45,15 +49,23 @@ class RepoConfig:
     # GitHub poll interval
     poll_interval_sec: int = 45
 
+    # Issue queue defaults
+    queue_label: str = "agent:queued"
+    in_progress_label: str = "agent:in-progress"
+    done_label: str = "agent:done"
+
 @dataclass(frozen=True)
 class Policy:
     mode: str = "fast"  # fast | safe
     allowed_comment_authors: List[str] = None  # type: ignore
     deny_forks: bool = True
 
-    # Risk gates
+    # Path policy
     forbid_globs: List[str] = None  # type: ignore
     protect_globs: List[str] = None  # type: ignore
+    protect_behavior: str = "warn"   # warn | halt
+
+    # Diff size heuristic
     max_changed_lines: int = 4000
 
     # Automation gates
@@ -94,11 +106,17 @@ def load_repo_config(root: Path) -> Tuple[RepoConfig, Policy]:
     def get(d: Dict[str, Any], key: str, default: Any) -> Any:
         return d[key] if key in d else default
 
-    # Flattened TOML schema for simplicity (v0.1)
-    repo = get(cfg_data, "repo", None)
+    # Config
+    repo = get(cfg_data, "repo", None) or None
+    default_remote = get(cfg_data, "default_remote", "origin")
+    default_base_branch = get(cfg_data, "default_base_branch", "main")
+    default_base_ref = get(cfg_data, "default_base_ref", f"{default_remote}/{default_base_branch}")
+
     rc = RepoConfig(
         repo=repo,
-        default_base_ref=get(cfg_data, "default_base_ref", "origin/main"),
+        default_remote=default_remote,
+        default_base_branch=default_base_branch,
+        default_base_ref=default_base_ref,
         worktrees_dir=get(cfg_data, "worktrees_dir", ".worktrees"),
         af_dir=".agentforge",
         state_dir=get(cfg_data, "state_dir", ".agentforge/state"),
@@ -106,13 +124,16 @@ def load_repo_config(root: Path) -> Tuple[RepoConfig, Policy]:
         cache_dir=get(cfg_data, "cache_dir", ".agentforge/cache"),
         port_start=int(get(cfg_data, "port_start", 8081)),
         port_end=int(get(cfg_data, "port_end", 8180)),
-        compose_file=get(cfg_data, "compose_file", None),
-        compose_profile=get(cfg_data, "compose_profile", None),
+        compose_file=(get(cfg_data, "compose_file", None) or None),
+        compose_profile=(get(cfg_data, "compose_profile", None) or None),
         compose_project_prefix=get(cfg_data, "compose_project_prefix", "af"),
         harness_setup=list(get(cfg_data, "harness_setup", [])),
         harness_check=list(get(cfg_data, "harness_check", [])),
         default_provider=get(cfg_data, "default_provider", "codex_cli"),
         poll_interval_sec=int(get(cfg_data, "poll_interval_sec", 45)),
+        queue_label=get(cfg_data, "queue_label", "agent:queued"),
+        in_progress_label=get(cfg_data, "in_progress_label", "agent:in-progress"),
+        done_label=get(cfg_data, "done_label", "agent:done"),
     )
 
     pol = Policy(
@@ -121,6 +142,7 @@ def load_repo_config(root: Path) -> Tuple[RepoConfig, Policy]:
         deny_forks=bool(get(pol_data, "deny_forks", True)),
         forbid_globs=list(get(pol_data, "forbid_globs", [])),
         protect_globs=list(get(pol_data, "protect_globs", [])),
+        protect_behavior=get(pol_data, "protect_behavior", "warn"),
         max_changed_lines=int(get(pol_data, "max_changed_lines", 4000)),
         require_harness_check=bool(get(pol_data, "require_harness_check", True)),
         allow_auto_push=bool(get(pol_data, "allow_auto_push", True)),
