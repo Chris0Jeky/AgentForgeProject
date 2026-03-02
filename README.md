@@ -79,6 +79,7 @@ See `docs/`:
 - `07-providers.md` (add Gemini/Claude/local via plugins)
 - `10-porting-notes.md` (what was ported and why)
 - `11-testing-guide.md` (smoke tests and validation workflow)
+- `12-todos-placeholders.md` (tracked placeholders and implementation gaps)
 
 ---
 
