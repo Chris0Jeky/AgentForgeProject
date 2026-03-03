@@ -14,6 +14,11 @@ These are repository-specific working agreements for coding agents (Codex, Claud
   - `pytest -q`
 - Keep Python compatibility: 3.11+.
 - Keep runtime dependencies minimal (prefer stdlib). Dev tooling can live in optional extras.
+- If a task prompt explicitly says `Only edit ...` (or otherwise constrains files/commands), treat that as a hard override:
+  - edit only the named files
+  - skip broad repo discovery
+  - skip install/test commands unless explicitly requested in that task
+  - AgentForge will run post-edit harness checks separately
 
 ## Architectural expectations
 - Core logic lives under `agentforge/core`.
