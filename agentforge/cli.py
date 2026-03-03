@@ -99,7 +99,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         prompt = Path(args.prompt_file).read_text(encoding="utf-8")
     if not prompt:
         raise SystemExit("Provide --prompt or --prompt-file")
-    run_agent_role(root, cfg, pol, ws, provider=args.provider or cfg.default_provider, role=args.role, prompt=prompt, auto_commit=args.auto_commit, auto_push=args.auto_push)
+    allow_globs = [g for g in (args.allow_edit_glob or []) if str(g).strip()]
+    surgical = bool(args.surgical or allow_globs)
+    run_agent_role(
+        root,
+        cfg,
+        pol,
+        ws,
+        provider=args.provider or cfg.default_provider,
+        role=args.role,
+        prompt=prompt,
+        auto_commit=args.auto_commit,
+        auto_push=args.auto_push,
+        surgical=surgical,
+        allowed_edit_globs=allow_globs,
+    )
     return 0
 
 def cmd_daemon(args: argparse.Namespace) -> int:
@@ -422,6 +436,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--role", default="implement", choices=["implement", "review", "fix", "qa"])
     p_run.add_argument("--prompt", default=None)
     p_run.add_argument("--prompt-file", default=None)
+    p_run.add_argument("--surgical", action="store_true", help="Enforce edit scope with --allow-edit-glob.")
+    p_run.add_argument("--allow-edit-glob", action="append", default=[], help="Allowed file glob for surgical mode (repeatable).")
     p_run.add_argument("--auto-commit", action="store_true")
     p_run.add_argument("--auto-push", action="store_true")
     p_run.set_defaults(func=cmd_run)
