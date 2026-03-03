@@ -19,6 +19,13 @@ classifiers = [
 
 dependencies = []
 
+[project.optional-dependencies]
+# Development and CI dependencies
+# Install with: pip install -e .[dev]
+dev = [
+  "pytest>=8.0",
+]
+
 [project.scripts]
 agentforge = "agentforge.cli:main"
 af = "agentforge.cli:main"
