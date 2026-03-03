@@ -62,7 +62,6 @@ steps = [
   { type="lock", action="release", group="docs" },
 ]
 
-# Deterministic local QA workflow (no external model dependency).
 [workflow.qa_mock]
 steps = [
   { type="note", message="QA mock workflow start for {agent}:{task}" },
