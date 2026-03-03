@@ -68,6 +68,61 @@ Fix:
   - `agentforge/templates/workflows.toml`
   - `.agentforge/workflows.toml`
 
+### E) Harness used Git Bash Python instead of active Windows venv
+
+Symptoms:
+- Workflow step invoked `bash -lc python -m pytest -q` on Windows.
+- Tests ran under a different Python runtime (`/usr/lib/python3.11`) than the active `.venv`.
+
+Root cause:
+- Shell resolution always preferred `bash`/`sh`, even on Windows.
+
+Fix:
+- Made shell selection platform-aware:
+  - Windows: prefer `pwsh` / `powershell`, then `bash`/`sh`.
+  - Non-Windows: keep `bash`/`sh` first.
+
+Validation:
+- `pytest` passes in both:
+  - native invocation (`python -m pytest -q`)
+  - `bash -lc "python -m pytest -q"`
+- Added regression tests:
+  - `tests/test_shell_cmd.py`
+
+### F) Existing worktree metadata broken across mixed Git toolchains
+
+Symptoms:
+- Existing workspace runs failed with:
+  - `fatal: not a git repository: .../.git/worktrees/<name>`
+- `.worktrees/<name>/.git` pointed to `/cygdrive/...` style paths.
+
+Root cause:
+- Worktree metadata was created with path style from one Git toolchain and consumed by another.
+
+Fix:
+- Added best-effort `git worktree repair <workspace>` immediately after spawn.
+- Also used manual repair once for pre-existing workspaces:
+  - `git worktree repair <workspace-path>`
+
+Validation:
+- New workspaces now get canonical `gitdir: C:/...` pointers and run workflows correctly.
+
+### G) `codex_cli` provider could fail on Windows npm installs
+
+Symptoms:
+- `agentforge run --provider codex_cli ...` failed with `FileNotFoundError` even when `codex` existed.
+
+Root cause:
+- Provider checked `which("codex")` but still executed bare `codex`.
+- On some Windows setups this resolves to npm launchers (`codex.cmd`) that require explicit command resolution.
+
+Fix:
+- `codex_cli` now resolves and executes the concrete binary path:
+  - prefers `codex.cmd`, then `codex.exe`, then `codex`.
+  - wraps `.cmd`/`.bat` with `cmd /c ...`.
+- Added regression tests:
+  - `tests/test_provider_codex_cli.py`
+
 ## 2) Stabilization strategy
 
 ### Phase 1: Environment reliability
@@ -111,6 +166,26 @@ Exit criteria:
 - no parser regressions
 - no lock/workspace leaks after cleanup
 
+### Phase 4: Codex E2E path (real code change -> commit -> push -> PR)
+
+1. Confirm prerequisites in the same terminal where you run AgentForge:
+   - `where git`
+   - `where codex`
+   - `gh auth status`
+2. Spawn a dedicated smoke workspace:
+   - `agentforge spawn --agent demo --task codex-smoke`
+3. Run Codex implementer with auto commit/push:
+   - `agentforge run --agent demo --task codex-smoke --role implement --provider codex_cli --auto-commit --auto-push --prompt "<small, concrete edit request>"`
+4. Create PR:
+   - `agentforge pr create --agent demo --task codex-smoke --title "[demo] codex smoke" --body "Automated codex smoke run"`
+5. Optional: run daemon one-shot to validate command loop:
+   - `agentforge daemon --once`
+
+Exit criteria:
+- branch pushed to origin
+- PR exists
+- harness and guardrails passed
+
 ## 3) Ongoing QA recommendations
 
 1. Keep `qa_mock` as the first-line regression workflow for local manual QA.
@@ -119,3 +194,4 @@ Exit criteria:
    - `python -m pytest -q`
 3. Add a lightweight UI smoke test in CI later (headless browser) for tab navigation and core API wiring.
 4. Keep path normalization tests to prevent regressions in mixed shell environments on Windows.
+5. Keep manual smoke tasks in GitHub (`agent:test`) so queue/bootstrap runs are deterministic.
