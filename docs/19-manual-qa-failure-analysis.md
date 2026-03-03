@@ -143,6 +143,24 @@ Fix:
 Expected result:
 - More deterministic “surgical edit” behavior for direct one-file tasks.
 
+### I) Added hard surgical enforcement mode (allowlist-based)
+
+What it adds:
+- `agentforge run` now supports:
+  - `--surgical`
+  - `--allow-edit-glob <glob>` (repeatable)
+- If surgical mode is enabled, AgentForge now hard-fails when any changed path
+  falls outside the allowlist.
+- Validation uses `git status --porcelain`, so untracked files are checked too.
+
+Workflow support:
+- Agent workflow steps now support:
+  - `surgical = true`
+  - `allowed_edit_globs = ["docs/codex-smoke.md"]`
+
+Example:
+- `agentforge run --agent smoke --task shellfix --role implement --provider codex_cli --surgical --allow-edit-glob docs/codex-smoke.md --prompt "..."`
+
 ## 2) Stabilization strategy
 
 ### Phase 1: Environment reliability
