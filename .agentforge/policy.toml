@@ -9,7 +9,7 @@ mode = "fast"  # fast | safe
 
 # Who can control the daemon via PR comments:
 allowed_comment_authors = [
-  # "your-github-username"
+  "Chris0Jeky"
 ]
 
 # Safer default for automation:
