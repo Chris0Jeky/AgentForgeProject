@@ -61,3 +61,14 @@ steps = [
   { type="pr", action="create", enabled="{create_prs}", draft="{draft_prs}", title="[{agent}] {issue_title} (docs) (#{issue_number})", body="Automated by AgentForge.\n\nCloses #{issue_number}\n\nLock: docs" },
   { type="lock", action="release", group="docs" },
 ]
+
+# Deterministic local QA workflow (no external model dependency).
+[workflow.qa_mock]
+steps = [
+  { type="note", message="QA mock workflow start for {agent}:{task}" },
+  { type="lock", action="acquire", group="repo", ttl_sec=1800 },
+  { type="agent", role="implement", provider="mock", auto_commit=false, auto_push=false, prompt="Local QA mock execution for {task}" },
+  { type="harness", step="check" },
+  { type="lock", action="release", group="repo" },
+  { type="note", message="QA mock workflow done for {agent}:{task}" },
+]
