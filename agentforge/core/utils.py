@@ -20,22 +20,31 @@ def which(exe: str) -> Optional[str]:
 def shell_cmd(command: str) -> List[str]:
     """Return a command list that runs `command` in an available shell.
 
-    Priority:
-      1) bash -lc (best for dev toolchains)
-      2) sh -lc
-      3) pwsh -NoProfile -Command
-      4) powershell -NoProfile -Command
+    Priority is platform-aware:
+      - Windows: pwsh, powershell, bash, sh
+      - Non-Windows: bash, sh, pwsh, powershell
 
     If none exist, raise a clear error.
     """
-    if which("bash"):
-        return ["bash", "-lc", command]
-    if which("sh"):
-        return ["sh", "-lc", command]
-    if which("pwsh"):
-        return ["pwsh", "-NoProfile", "-Command", command]
-    if which("powershell"):
-        return ["powershell", "-NoProfile", "-Command", command]
+    if os.name == "nt":
+        candidates = [
+            ("pwsh", ["-NoProfile", "-Command"]),
+            ("powershell", ["-NoProfile", "-Command"]),
+            ("bash", ["-lc"]),
+            ("sh", ["-lc"]),
+        ]
+    else:
+        candidates = [
+            ("bash", ["-lc"]),
+            ("sh", ["-lc"]),
+            ("pwsh", ["-NoProfile", "-Command"]),
+            ("powershell", ["-NoProfile", "-Command"]),
+        ]
+
+    for exe, args in candidates:
+        if which(exe):
+            return [exe, *args, command]
+
     raise RuntimeError("No supported shell found (need bash/sh or PowerShell).")
 
 def run(cmd: List[str], *, cwd: Optional[Path]=None, env: Optional[Dict[str, str]]=None, capture: bool=False) -> Tuple[int, str, str]:
