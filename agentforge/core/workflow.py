@@ -279,6 +279,17 @@ def run_workflow(
                 prompt = _read_prompt(step, root, ws_path, ctx)
                 auto_commit = bool(step.get("auto_commit") if "auto_commit" in step else pol.allow_auto_commit)
                 auto_push = bool(step.get("auto_push") if "auto_push" in step else pol.allow_auto_push)
+                raw_allow = step.get("allowed_edit_globs", step.get("allow_edit_globs", []))
+                allowed_edit_globs: List[str] = []
+                if isinstance(raw_allow, list):
+                    allowed_edit_globs = [_fmt(str(x), ctx) for x in raw_allow if str(x).strip()]
+                elif raw_allow is not None and str(raw_allow).strip():
+                    allowed_edit_globs = [_fmt(str(raw_allow), ctx)]
+                surgical = _eval_bool(
+                    step.get("surgical", bool(allowed_edit_globs)),
+                    ctx,
+                    default=bool(allowed_edit_globs),
+                )
                 run_agent_role(
                     root,
                     cfg,
@@ -289,8 +300,11 @@ def run_workflow(
                     prompt=prompt,
                     auto_commit=auto_commit,
                     auto_push=auto_push,
+                    surgical=surgical,
+                    allowed_edit_globs=allowed_edit_globs,
                 )
-                record(i, stype, True, f"agent role={role} provider={provider}")
+                sg = f" surgical={surgical}" if surgical else ""
+                record(i, stype, True, f"agent role={role} provider={provider}{sg}")
 
             elif stype == "pr":
                 action = str(step.get("action") or "create").lower()
