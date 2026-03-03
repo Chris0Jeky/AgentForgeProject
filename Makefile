@@ -6,7 +6,7 @@ install:
 	$(PY) -m pip install -e .
 
 test:
-	$(PY) -m unittest -v
+	$(PY) -m pytest -q
 
 lint:
 	$(PY) -m compileall agentforge
