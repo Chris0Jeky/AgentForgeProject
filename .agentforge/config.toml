@@ -2,7 +2,7 @@
 
 # Optional: enable GitHub automation by setting owner/repo.
 # Example: repo = "Chris0Jeky/Taskdeck"
-repo = ""
+repo = "Chris0Jeky/AgentForgeProject"
 
 default_base_ref = "origin/main"
 worktrees_dir = ".worktrees"
@@ -29,7 +29,7 @@ harness_setup = [
   # "npm ci",
 ]
 harness_check = [
-  # "npm test",
+  "python -m pytest -q",
 ]
 
 # Default provider adapter
