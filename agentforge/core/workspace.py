@@ -48,6 +48,18 @@ def _has_remote(root: Path, remote: str) -> bool:
     except Exception:
         return False
 
+def _repair_worktree_metadata(root: Path, wpath: Path) -> None:
+    """Best-effort metadata repair for mixed Git toolchains on Windows.
+
+    Some setups mix Git for Windows and MSYS/Cygwin Git, which can leave
+    worktree admin pointers in an incompatible path format for subsequent runs.
+    """
+    try:
+        run(["git", "worktree", "repair", str(wpath)], cwd=root)
+    except Exception:
+        # Keep spawn resilient; a repair failure should not block normal usage.
+        pass
+
 def spawn_workspace(root: Path, cfg: RepoConfig, pol: Policy, state_file: Path, *, agent: str, task: str, base_ref: Optional[str]=None) -> Workspace:
     ensure_dir(root / cfg.worktrees_dir)
     wpath = root / cfg.worktrees_dir / _folder_name(agent, task)
@@ -69,6 +81,7 @@ def spawn_workspace(root: Path, cfg: RepoConfig, pol: Policy, state_file: Path, 
     except Exception:
         base = "HEAD"
     run(["git", "worktree", "add", "-b", br, str(wpath), base], cwd=root)
+    _repair_worktree_metadata(root, wpath)
 
     with state_lock(state_file):
         st = load_state(state_file)
