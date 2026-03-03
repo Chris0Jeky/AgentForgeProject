@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -115,17 +115,17 @@ def _normalize_repo_root_path(raw: str) -> Path:
     """
     s = str(raw or "").strip()
     if not s:
-        return Path(s)
+        return _safe_path(s)
 
     if os.name != "nt":
-        return Path(s)
+        return _safe_path(s)
 
     # Convert Cygwin path: /cygdrive/c/Users/... -> C:/Users/...
     m = re.match(r"^/cygdrive/([a-zA-Z])/(.*)$", s)
     if m:
         drive = m.group(1).upper()
         rest = m.group(2)
-        return Path(f"{drive}:/{rest}")
+        return _safe_path(f"{drive}:/{rest}")
 
     # Convert common MSYS path: /c/Users/... -> C:/Users/...
     m = re.match(r"^/([a-zA-Z])/(.*)$", s)
@@ -133,9 +133,22 @@ def _normalize_repo_root_path(raw: str) -> Path:
         drive = m.group(1).upper()
         rest = m.group(2)
         # Only apply when path does not already look like an absolute UNC/Windows path.
-        return Path(f"{drive}:/{rest}")
+        return _safe_path(f"{drive}:/{rest}")
 
-    return Path(s)
+    return _safe_path(s)
+
+
+def _safe_path(value: str) -> Path:
+    """Create a Path robustly across mixed-shell Windows test environments.
+
+    When tests monkeypatch os.name="nt" under a POSIX Python runtime,
+    pathlib.Path may try to instantiate WindowsPath and raise NotImplementedError.
+    In that narrow case, keep a usable path object for comparisons and logging.
+    """
+    try:
+        return Path(value)
+    except NotImplementedError:
+        return PosixPath(value.replace("\\", "/"))
 
 
 def _load_toml(path: Path) -> Dict[str, Any]:
