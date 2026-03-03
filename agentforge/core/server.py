@@ -422,9 +422,9 @@ function startRunStream(run_id, outEl) {{
   es.onmessage = (msg) => {{
     try {{
       const ev = JSON.parse(msg.data);
-      outEl.textContent += fmtEvent(ev) + "\n";
+      outEl.textContent += fmtEvent(ev) + "\\n";
     }} catch (e) {{
-      outEl.textContent += msg.data + "\n";
+      outEl.textContent += msg.data + "\\n";
     }}
     outEl.scrollTop = outEl.scrollHeight;
   }};
@@ -596,7 +596,7 @@ async function runWorkflowAsync() {{
     out.textContent = JSON.stringify(r.data, null, 2);
     return;
   }}
-  out.textContent = 'run_id: ' + r.data.run_id + "\n";
+  out.textContent = 'run_id: ' + r.data.run_id + "\\n";
   wfES = startRunStream(r.data.run_id, out);
   await refreshRuns();
 }}
@@ -627,7 +627,7 @@ async function runBootstrapAsync() {{
     out.textContent = JSON.stringify(r.data, null, 2);
     return;
   }}
-  out.textContent = 'run_id: ' + r.data.run_id + "\n";
+  out.textContent = 'run_id: ' + r.data.run_id + "\\n";
   qES = startRunStream(r.data.run_id, out);
   await refresh();
 }}
