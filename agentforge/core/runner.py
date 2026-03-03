@@ -12,6 +12,7 @@ from .guardrails import evaluate_policy_globs
 from .utils import out, run
 from agentforge.providers import get_provider
 from .mcp import load_mcp_config, ensure_gateway_running
+from .guardrails import matches_any_glob
 
 def _load_env(ws_path: Path) -> Dict[str, str]:
     env: Dict[str, str] = {}
@@ -37,9 +38,62 @@ def _git_commit_all(ws_path: Path, message: str) -> None:
 def _git_push(ws_path: Path, branch: str, remote: str="origin") -> None:
     run(["git", "push", "-u", remote, branch], cwd=ws_path)
 
-def run_agent_role(root: Path, cfg: RepoConfig, pol: Policy, ws: Workspace, *, provider: str, role: str, prompt: str, auto_commit: bool, auto_push: bool) -> None:
+def _status_changed_paths_from_porcelain(porcelain: str) -> List[str]:
+    paths: List[str] = []
+    for line in (porcelain or "").splitlines():
+        if not line:
+            continue
+        # Porcelain v1: XY <path>  or  R  old -> new
+        path_part = line[3:] if len(line) >= 4 else line
+        if " -> " in path_part:
+            path_part = path_part.split(" -> ", 1)[1]
+        p = path_part.strip()
+        if p.startswith('"') and p.endswith('"') and len(p) >= 2:
+            p = p[1:-1]
+        if p:
+            paths.append(p.replace("\\", "/"))
+    # Stable + unique while preserving order
+    seen = set()
+    out_paths: List[str] = []
+    for p in paths:
+        if p in seen:
+            continue
+        seen.add(p)
+        out_paths.append(p)
+    return out_paths
+
+def _working_tree_changed_files(ws_path: Path) -> List[str]:
+    txt = out(["git", "status", "--porcelain"], cwd=ws_path)
+    return _status_changed_paths_from_porcelain(txt)
+
+def _violating_paths(changed_paths: List[str], allowed_globs: List[str]) -> List[str]:
+    if not allowed_globs:
+        return []
+    bad: List[str] = []
+    for p in changed_paths:
+        if not matches_any_glob(p, allowed_globs):
+            bad.append(p)
+    return bad
+
+def run_agent_role(
+    root: Path,
+    cfg: RepoConfig,
+    pol: Policy,
+    ws: Workspace,
+    *,
+    provider: str,
+    role: str,
+    prompt: str,
+    auto_commit: bool,
+    auto_push: bool,
+    surgical: bool = False,
+    allowed_edit_globs: Optional[List[str]] = None,
+) -> None:
     ws_path = Path(ws.path)
     prov = get_provider(provider)
+    allowed_globs = [g.strip() for g in (allowed_edit_globs or []) if str(g).strip()]
+    if surgical and not allowed_globs:
+        raise SystemExit("Surgical mode requires at least one allowed edit glob.")
 
     env = os.environ.copy()
     env.update(_load_env(ws_path))
@@ -110,12 +164,32 @@ def run_agent_role(root: Path, cfg: RepoConfig, pol: Policy, ws: Workspace, *, p
             f"TASK:\n{prompt}\n"
         )
 
+    if surgical:
+        allow_txt = "\n".join(f"- {g}" for g in allowed_globs)
+        prompt += (
+            "\n\n[SURGICAL MODE]\n"
+            "Strict constraint: only modify files matching one of these glob patterns:\n"
+            f"{allow_txt}\n"
+            "If you need to touch any other file, stop and explain why instead of editing.\n"
+        )
+
     if mcp_hint:
         prompt += mcp_hint
 
     res = prov.run(prompt=prompt, cwd=ws_path, env=env)
     if not res.ok:
         raise SystemExit(f"Provider {provider} failed: {res.stderr}")
+
+    if surgical:
+        changed_now = _working_tree_changed_files(ws_path)
+        bad = _violating_paths(changed_now, allowed_globs)
+        if bad:
+            details = "\n".join(f"- {p}" for p in bad)
+            raise SystemExit(
+                "Surgical mode violation: changed files outside allowlist.\n"
+                f"Allowed globs: {', '.join(allowed_globs)}\n"
+                f"Out-of-scope files:\n{details}"
+            )
 
     # Guardrails: policy glob enforcement
     files = changed_files(ws_path, base_ref=cfg.default_base_ref)
