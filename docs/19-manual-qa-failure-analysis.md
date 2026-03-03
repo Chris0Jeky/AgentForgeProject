@@ -120,8 +120,28 @@ Fix:
 - `codex_cli` now resolves and executes the concrete binary path:
   - prefers `codex.cmd`, then `codex.exe`, then `codex`.
   - wraps `.cmd`/`.bat` with `cmd /c ...`.
+- Provider now injects per-process Git safe-directory config into the Codex run environment
+  (avoids global `git config --global` writes from sandbox user).
 - Added regression tests:
   - `tests/test_provider_codex_cli.py`
+
+### H) Explicit “single-file edit” prompts still triggered broad exploration
+
+Symptoms:
+- Even with a direct prompt (`Only edit docs/codex-smoke.md ...`), Codex explored repo/test state first.
+
+Root cause:
+- Repository-level agent guidance and implement-role framing still nudged toward discovery + tests.
+
+Fix:
+- Tightened implement/fix role prompts in `runner.py`:
+  - TASK text is authoritative.
+  - explicit file scope means edit only those files.
+  - skip install/test/lint unless the TASK explicitly asks.
+- Updated `AGENTS.md` to encode the same precedence rule for constrained prompts.
+
+Expected result:
+- More deterministic “surgical edit” behavior for direct one-file tasks.
 
 ## 2) Stabilization strategy
 
