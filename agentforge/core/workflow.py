@@ -267,8 +267,8 @@ def run_workflow(
                     raise WorkflowError(f"Unknown lock action: {action}")
 
             elif stype == "harness":
-                name = str(step.get("name") or "check")
-                ok = run_harness_step(root=root, cfg=cfg, ws_path=ws_path, name=name, capture=False)
+                name = str(step.get("name") or step.get("step") or "check")
+                ok = run_harness_step(root=root, cfg=cfg, ws=ws, step=name)
                 if not ok:
                     raise WorkflowError(f"Harness step failed: {name}")
                 record(i, stype, True, f"harness {name} ok")
