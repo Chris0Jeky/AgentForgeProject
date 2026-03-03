@@ -53,3 +53,10 @@ def test_run_returns_error_on_command_failure() -> None:
     assert res.ok is False
     assert "boom" in (res.stderr or "")
 
+
+def test_inject_git_safe_directory_env_appends_entry() -> None:
+    env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "x"}
+    CodexCliProvider._inject_git_safe_directory(env, Path(r"C:\repo\ws"))
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert env["GIT_CONFIG_KEY_1"] == "safe.directory"
+    assert env["GIT_CONFIG_VALUE_1"] == "C:/repo/ws"

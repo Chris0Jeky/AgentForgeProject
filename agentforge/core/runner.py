@@ -91,14 +91,16 @@ def run_agent_role(root: Path, cfg: RepoConfig, pol: Policy, ws: Workspace, *, p
     elif role == "fix":
         prompt = (
             "You are a fixer agent. Apply the requested changes. Keep edits minimal and consistent.\n"
-            "After changes, run harness checks and ensure green.\n\n"
+            "Do not run install/test harness commands unless explicitly requested.\n"
+            "AgentForge will run harness checks after your edits.\n\n"
             f"REQUESTED CHANGES:\n{prompt}\n"
         )
     else:  # implement
         prompt = (
             "You are an implementer agent. Implement the task.\n"
             "Follow project conventions, update tests as needed, and keep the diff focused.\n"
-            "After changes, run harness checks and ensure green.\n\n"
+            "Do not run install/test harness commands unless explicitly requested.\n"
+            "AgentForge will run harness checks after your edits.\n\n"
             f"TASK:\n{prompt}\n"
         )
 

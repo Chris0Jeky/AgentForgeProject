@@ -22,6 +22,7 @@ class CodexCliProvider:
         merged = os.environ.copy()
         if env:
             merged.update(env)
+        self._inject_git_safe_directory(merged, cwd)
 
         # Non-interactive: codex exec "..."
         # Keep capture minimal to avoid huge memory use; use check=False pattern here
@@ -43,3 +44,16 @@ class CodexCliProvider:
         if lower.endswith(".cmd") or lower.endswith(".bat"):
             return ["cmd", "/c", codex_bin, "exec", prompt]
         return [codex_bin, "exec", prompt]
+
+    @staticmethod
+    def _inject_git_safe_directory(env: Dict[str, str], cwd: Path) -> None:
+        """Inject safe.directory for sandboxed git commands without touching global config."""
+        raw = env.get("GIT_CONFIG_COUNT", "0")
+        try:
+            count = int(raw)
+        except Exception:
+            count = 0
+        idx = count
+        env[f"GIT_CONFIG_KEY_{idx}"] = "safe.directory"
+        env[f"GIT_CONFIG_VALUE_{idx}"] = cwd.as_posix()
+        env["GIT_CONFIG_COUNT"] = str(idx + 1)
