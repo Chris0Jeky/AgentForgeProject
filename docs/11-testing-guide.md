@@ -28,7 +28,7 @@ python -m venv .venv
 # Bash:
 # source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e .
+python -m pip install -e .[dev]
 ```
 
 ## 3) Basic Import And CLI Smoke Checks
@@ -45,7 +45,6 @@ agentforge daemon --help
 ## 3.5) Run Unit Tests
 
 ```bash
-python -m pip install pytest
 python -m pytest -q
 ```
 

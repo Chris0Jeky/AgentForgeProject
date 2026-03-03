@@ -33,7 +33,7 @@ Or:
 agentforge serve --actions
 ```
 
-POST actions require a token via `X-AgentForge-Token`.
+POST actions require a token via `Authorization: Bearer <token>`.
 The UI stores it in `localStorage` if you pass it via `?token=...`.
 
 **Security model**

@@ -2,13 +2,13 @@
 
 This repository ships with a lightweight CI pipeline:
 - compile the package (`python -m compileall`)
-- run unit tests (`python -m unittest -v`)
+- run unit tests (`pytest -q`)
 
 See `.github/workflows/ci.yml`.
 
 ## Local developer workflows
 
-- `make test`
+- `make test` (requires `pip install -e .[dev]` once)
 - `make lint` (compile-only; you can add ruff/mypy later)
 - `make build`
 

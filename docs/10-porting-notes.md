@@ -78,3 +78,16 @@ If you continue from the memo roadmap, the next low-risk features are:
 1. `agentforge bootstrap` (`init + spawn + daemon` orchestration)
 2. Optional issue queue intake (`gh issue list` + claim flow)
 3. Optional PR creation command once `run` succeeds
+
+## Incremental updates applied after initial port
+
+The repo has since been incrementally updated from later archive drops (v2-v5).
+Recent v5-specific additions include:
+
+1. CI now installs dev extras and runs `pytest -q` so pytest-style tests execute in CI.
+2. `pyproject.toml` now defines a `dev` extra with pytest.
+3. `Makefile` test target now runs pytest.
+4. Root `AGENTS.md` was added to define repository-specific guidance for coding agents.
+5. UI/MCP docs were updated to reflect Bearer-token action auth behavior.
+6. A system-level architecture explainer was added:
+   - `docs/18-architecture-and-review-loop.md`
