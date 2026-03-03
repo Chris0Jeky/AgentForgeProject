@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -90,7 +92,7 @@ def find_repo_root(start: Optional[Path] = None) -> Path:
     # Prefer git, but fall back to walking up
     try:
         root = out(["git", "rev-parse", "--show-toplevel"], cwd=start)
-        return Path(root)
+        return _normalize_repo_root_path(root)
     except Exception:
         p = start.resolve()
         for _ in range(50):
@@ -100,6 +102,40 @@ def find_repo_root(start: Optional[Path] = None) -> Path:
                 break
             p = p.parent
     raise SystemExit("Not inside a git repository (no .git found and git rev-parse failed).")
+
+
+def _normalize_repo_root_path(raw: str) -> Path:
+    """Normalize git-reported repo roots to local filesystem semantics.
+
+    On some Windows setups (Cygwin/MSYS git), `git rev-parse --show-toplevel`
+    can return POSIX-style roots such as:
+    - /cygdrive/c/Users/...
+    - /c/Users/...
+    which are not directly usable as Windows working directories in subprocess calls.
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return Path(s)
+
+    if os.name != "nt":
+        return Path(s)
+
+    # Convert Cygwin path: /cygdrive/c/Users/... -> C:/Users/...
+    m = re.match(r"^/cygdrive/([a-zA-Z])/(.*)$", s)
+    if m:
+        drive = m.group(1).upper()
+        rest = m.group(2)
+        return Path(f"{drive}:/{rest}")
+
+    # Convert common MSYS path: /c/Users/... -> C:/Users/...
+    m = re.match(r"^/([a-zA-Z])/(.*)$", s)
+    if m:
+        drive = m.group(1).upper()
+        rest = m.group(2)
+        # Only apply when path does not already look like an absolute UNC/Windows path.
+        return Path(f"{drive}:/{rest}")
+
+    return Path(s)
 
 
 def _load_toml(path: Path) -> Dict[str, Any]:
