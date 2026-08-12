@@ -55,5 +55,9 @@ class CodexCliProvider:
             count = 0
         idx = count
         env[f"GIT_CONFIG_KEY_{idx}"] = "safe.directory"
-        env[f"GIT_CONFIG_VALUE_{idx}"] = cwd.as_posix()
+        # A Windows-looking path can be represented by PosixPath in tests and
+        # mixed-shell environments. Git accepts forward slashes on every
+        # supported platform, so normalize the string explicitly rather than
+        # relying on the concrete pathlib class.
+        env[f"GIT_CONFIG_VALUE_{idx}"] = str(cwd).replace("\\", "/")
         env["GIT_CONFIG_COUNT"] = str(idx + 1)

@@ -9,13 +9,13 @@ from agentforge.core.config import _normalize_repo_root_path
 def test_normalize_cygdrive_windows() -> None:
     with patch("agentforge.core.config.os.name", "nt"):
         p = _normalize_repo_root_path("/cygdrive/c/Users/jekyt/source/AgentForge/AgentForgeProject")
-    assert p == Path(r"C:/Users/jekyt/source/AgentForge/AgentForgeProject")
+    assert str(p).replace("\\", "/") == "C:/Users/jekyt/source/AgentForge/AgentForgeProject"
 
 
 def test_normalize_msys_windows() -> None:
     with patch("agentforge.core.config.os.name", "nt"):
         p = _normalize_repo_root_path("/c/Users/jekyt/source/AgentForge/AgentForgeProject")
-    assert p == Path(r"C:/Users/jekyt/source/AgentForge/AgentForgeProject")
+    assert str(p).replace("\\", "/") == "C:/Users/jekyt/source/AgentForge/AgentForgeProject"
 
 
 def test_no_normalize_non_windows() -> None:
