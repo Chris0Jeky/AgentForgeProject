@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import http.client
 import json
+import signal
 import os
 import secrets
 import socket
@@ -16,6 +18,7 @@ try:
 except Exception:  # pragma: no cover
     tomllib = None
 
+from .file_mutex import file_mutex
 from .utils import CommandError, run, which, ensure_dir, atomic_write_text
 
 
@@ -216,14 +219,36 @@ def _gateways_path(root: Path, cfg) -> Path:
     return root / cfg.state_dir / "mcp_gateways.json"
 
 
-def _pid_alive(pid: int) -> bool:
-    if not pid or pid <= 0:
-        return False
+# A saved PID cannot establish ownership after a coordinator restart.
+_gateway_processes: Dict[tuple, tuple] = {}
+
+
+def _owned_process(root: Path, cfg, info: dict):
+    owned = _gateway_processes.get((str(_gateways_path(root, cfg).resolve()), info.get("operation_id")))
+    if owned:
+        process, pidfd, intent = owned
+        if all(info.get(k) == intent.get(k) for k in ("operation_id", "command", "port", "auth_token", "url")):
+            if not info.get("pid") or info["pid"] == process.pid:
+                return owned
+    raise McpError("Gateway ownership is unprovable; reconcile the retained gateway record and OS process manually.")
+
+
+def _gateway_ready(info: dict) -> bool:
+    # The fresh launch token must be enforced by this endpoint before it is advertised.
+    path = "/sse" if info["transport"] == "sse" else "/mcp"
+    url = urlsplit(info["url"])
+    statuses = []
     try:
-        os.kill(pid, 0)
-        return True
-    except Exception:
+        for headers in ({}, {"Authorization": "Bearer " + info["auth_token"]}):
+            conn = http.client.HTTPConnection(url.hostname, url.port, timeout=0.2)
+            try:
+                conn.request("GET", path, headers=headers)
+                statuses.append(conn.getresponse().status)
+            finally:
+                conn.close()
+    except (OSError, http.client.HTTPException):
         return False
+    return statuses[0] in (401, 403) and statuses[1] == 200
 
 
 def _load_gateways(root: Path, cfg) -> Dict[str, Dict[str, Any]]:
@@ -232,9 +257,11 @@ def _load_gateways(root: Path, cfg) -> Dict[str, Dict[str, Any]]:
         return {}
     try:
         j = json.loads(p.read_text(encoding="utf-8"))
-        return dict(j or {})
-    except Exception:
-        return {}
+        if not isinstance(j, dict) or any(not isinstance(v, dict) for v in j.values()):
+            raise ValueError("Expected gateway records keyed by gateway identity")
+        return j
+    except Exception as e:
+        raise McpError("Gateway registry is unreadable; reconcile it before starting or stopping gateways.") from e
 
 
 def _save_gateways(root: Path, cfg, gws: Dict[str, Dict[str, Any]]) -> None:
@@ -243,18 +270,17 @@ def _save_gateways(root: Path, cfg, gws: Dict[str, Dict[str, Any]]) -> None:
     atomic_write_text(p, json.dumps(gws, indent=2))
 
 
-def _find_free_port(host: str, start: int, end: int) -> int:
+def _find_free_port(host: str, start: int, end: int, reserved=None) -> int:
     for port in range(start, end + 1):
+        if port in (reserved or set()):
+            continue
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind((host, port))
                 return port
             except OSError:
                 continue
-    # fallback: ephemeral
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((host, 0))
-        return int(s.getsockname()[1])
+    raise McpError("No unreserved gateway port is available in the configured range.")
 
 
 def gateway_status(info: Dict[str, Any]) -> Dict[str, Any]:
@@ -273,24 +299,22 @@ def gateway_status(info: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def list_gateways(root: Path, cfg) -> List[Dict[str, Any]]:
-    """List public gateway status (best-effort). Removes stale entries."""
-    gws = _load_gateways(root, cfg)
-    changed = False
-    out: List[Dict[str, Any]] = []
-    for k, v in list(gws.items()):
-        pid = int(v.get("pid") or 0)
-        if pid and not _pid_alive(pid):
-            del gws[k]
-            changed = True
-            continue
-        out.append(gateway_status(v))
-    if changed:
-        _save_gateways(root, cfg, gws)
-    out.sort(key=lambda x: str(x.get("key") or ""))
-    return out
+    """Observe retained records without deleting unresolved ownership evidence."""
+    with file_mutex(_gateways_path(root, cfg).with_suffix(".mutex")):
+        out = []
+        for info in _load_gateways(root, cfg).values():
+            status = gateway_status(info)
+            status["state"] = "unresolved"
+            try:
+                process, _, _ = _owned_process(root, cfg, info)
+                status["state"] = "exited" if process.poll() is not None else info.get("state", "unresolved")
+            except (McpError, OSError):
+                pass
+            out.append(status)
+        return sorted(out, key=lambda x: str(x.get("key") or ""))
 
 
-def ensure_gateway_running(
+def _ensure_gateway_running(
     root: Path,
     cfg,
     mcfg: McpConfig,
@@ -306,18 +330,20 @@ def ensure_gateway_running(
 
     transport: optional override for this start.
     """
-    if not docker_mcp_available():
-        raise McpError("docker mcp not available")
-
     gw_key = key or "__global__"
     gws = _load_gateways(root, cfg)
     existing = gws.get(gw_key)
     if existing:
-        pid = int(existing.get("pid") or 0)
-        if pid and _pid_alive(pid):
+        process, _, _ = _owned_process(root, cfg, existing)
+        if process.poll() is None and _gateway_ready(existing) and process.poll() is None:
+            existing.update(pid=process.pid, state="running")
+            _save_gateways(root, cfg, gws)
             return dict(existing)
-        # stale entry
-        gws.pop(gw_key, None)
+        raise McpError("Gateway exited or launch is unresolved; reconcile the retained record before restarting.")
+    if not docker_mcp_available():
+        raise McpError("docker mcp not available")
+    if os.name != "nt" and not (hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")):
+        raise McpError("Safe gateway process handles are unavailable on this platform.")
 
     t = (transport or mcfg.gateway_transport or "sse").strip().lower()
     if t in ["stdio"]:
@@ -326,10 +352,11 @@ def ensure_gateway_running(
     if mcfg.gateway_auto_sync:
         docker_sync_profile(mcfg)
 
-    port = _find_free_port(mcfg.gateway_bind_host, int(mcfg.gateway_port_start), int(mcfg.gateway_port_end))
+    used_ports = {int(v["port"]) for v in gws.values() if v.get("port")}
+    port = _find_free_port(mcfg.gateway_bind_host, int(mcfg.gateway_port_start), int(mcfg.gateway_port_end), used_ports)
     auth = secrets.token_hex(16)
 
-    cmd = ["docker", "mcp", "gateway", "run", "--profile", mcfg.profile, "--transport", t, "--port", str(port)]
+    cmd = [which("docker") or "docker", "mcp", "gateway", "run", "--profile", mcfg.profile, "--transport", t, "--port", str(port)]
     if mcfg.gateway_log_calls:
         cmd += ["--log-calls"]
     if mcfg.gateway_watch:
@@ -348,9 +375,6 @@ def ensure_gateway_running(
     env = os.environ.copy()
     env["MCP_GATEWAY_AUTH_TOKEN"] = auth
 
-    with log_path.open("ab") as lf:
-        p = subprocess.Popen(cmd, cwd=str(root), stdout=lf, stderr=lf, env=env)
-
     url = f"http://{mcfg.gateway_bind_host}:{port}"
     info = {
         "key": gw_key if gw_key != "__global__" else "",
@@ -358,28 +382,61 @@ def ensure_gateway_running(
         "transport": t,
         "port": port,
         "url": url,
-        "pid": p.pid,
+        "pid": None,
         "auth_token": auth,
         "log_path": str(log_path),
         "started_ts": int(time.time()),
+        "operation_id": secrets.token_hex(16),
+        "command": cmd,
+        "state": "launching",
     }
     gws[gw_key] = info
     _save_gateways(root, cfg, gws)
-    return dict(info)
+    # The durable intent reserves this port against other AgentForge launches.
+    with log_path.open("ab") as lf:
+        process = subprocess.Popen(cmd, cwd=str(root), stdout=lf, stderr=lf, env=env)
+    # An unreaped child PID cannot be reused before pidfd_open binds the handle.
+    pidfd = os.pidfd_open(process.pid) if os.name != "nt" else None
+    _gateway_processes[(str(_gateways_path(root, cfg).resolve()), info["operation_id"])] = (process, pidfd, dict(info))
+    info["pid"] = process.pid
+    _save_gateways(root, cfg, gws)
+    deadline = time.monotonic() + 3
+    while process.poll() is None and time.monotonic() < deadline:
+        if _gateway_ready(info) and process.poll() is None:
+            info["state"] = "running"
+            _save_gateways(root, cfg, gws)
+            return dict(info)
+        time.sleep(0.05)
+    info["state"] = "unresolved"
+    _save_gateways(root, cfg, gws)
+    raise McpError("Gateway endpoint ownership could not be attested; reconcile the retained launch record.")
+
+
+def ensure_gateway_running(root: Path, cfg, mcfg: McpConfig, *, key: Optional[str] = None,
+                           transport: Optional[str] = None) -> Dict[str, Any]:
+    with file_mutex(_gateways_path(root, cfg).with_suffix(".mutex")):
+        return _ensure_gateway_running(root, cfg, mcfg, key=key, transport=transport)
 
 
 def stop_gateway(root: Path, cfg, *, key: Optional[str] = None) -> None:
-    gw_key = key or "__global__"
-    gws = _load_gateways(root, cfg)
-    info = gws.get(gw_key)
-    if not info:
-        return
-    pid = int(info.get("pid") or 0)
-    if pid and _pid_alive(pid):
+    with file_mutex(_gateways_path(root, cfg).with_suffix(".mutex")):
+        gw_key = key or "__global__"
+        gws = _load_gateways(root, cfg)
+        info = gws.get(gw_key)
+        if not info:
+            return
+        process, pidfd, _ = _owned_process(root, cfg, info)
         try:
-            # Best-effort terminate.
-            os.kill(pid, 15)
-        except Exception:
-            pass
-    gws.pop(gw_key, None)
-    _save_gateways(root, cfg, gws)
+            if process.poll() is None:
+                if os.name == "nt":
+                    process.terminate()  # Popen retains the Windows process handle.
+                else:
+                    signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise McpError("Gateway stop unconfirmed; reconcile the retained record.") from e
+        gws.pop(gw_key)
+        _save_gateways(root, cfg, gws)
+        _gateway_processes.pop((str(_gateways_path(root, cfg).resolve()), info.get("operation_id")), None)
+        if pidfd is not None:
+            os.close(pidfd)

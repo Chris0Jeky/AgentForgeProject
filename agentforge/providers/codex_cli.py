@@ -17,7 +17,7 @@ class CodexCliProvider:
     def run(self, *, prompt: str, cwd: Path, env: Optional[Dict[str, str]]=None) -> RunResult:
         codex_bin = self._resolve_codex_bin()
         if codex_bin is None:
-            return RunResult(ok=False, stderr="codex CLI not found on PATH")
+            return RunResult(ok=False, stderr="codex CLI not found on PATH", returncode=127)
 
         merged = os.environ.copy()
         if env:
@@ -31,7 +31,7 @@ class CodexCliProvider:
             run(cmd, cwd=cwd, env=merged, capture=False)
             return RunResult(ok=True)
         except CommandError as e:
-            return RunResult(ok=False, stdout=e.stdout, stderr=e.stderr)
+            return RunResult(ok=False, stdout=e.stdout, stderr=e.stderr, returncode=e.returncode)
 
     @staticmethod
     def _resolve_codex_bin() -> Optional[str]:

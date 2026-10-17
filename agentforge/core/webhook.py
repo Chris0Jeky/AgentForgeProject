@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
 
 from .config import RepoConfig, Policy
 from .policy import is_allowed_commenter
-from .daemon import _handle_command  # reuse
-from .state import load_state, save_state, state_lock
+from .daemon import _process_comments, _parse_repo
+from .github import list_issue_comments
 
 COMMAND_RE = re.compile(r"^/agentforge\s+(?P<cmd>\w+)(?P<rest>[\s\S]*)$", re.IGNORECASE)
 
@@ -36,17 +35,10 @@ def handle_github_event_file(root: Path, cfg: RepoConfig, pol: Policy, st_file: 
         return
 
     pr_number = int(issue.get("number"))
-    cmd = m.group("cmd")
-    rest = m.group("rest") or ""
     comment_id = int(comment.get("id") or 0)
 
-    # Update last seen
-    with state_lock(st_file):
-        st = load_state(st_file)
-        st.setdefault("prs", {}).setdefault(str(pr_number), {})["last_comment_id"] = max(
-            int(st.get("prs", {}).get(str(pr_number), {}).get("last_comment_id", 0)),
-            comment_id
-        )
-        save_state(st_file, st)
-
-    _handle_command(root, cfg, pol, st_file, pr_number, author, cmd, rest)
+    owner, name = _parse_repo(cfg)
+    comments = list_issue_comments(owner, name, pr_number)
+    if not any(int(c["id"]) == comment_id for c in comments):
+        comments.append(comment)
+    _process_comments(root, cfg, pol, st_file, pr_number, comments)
