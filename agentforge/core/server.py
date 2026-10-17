@@ -835,7 +835,7 @@ refresh();
             # ----- Core status -----
             if path == "/api/status":
                 state = load_state(st_file)
-                ws = [w.__dict__ for w in list_workspaces(st_file)]
+                ws = [w.__dict__ for w in list_workspaces(st_file, include_pending=True)]
                 locks = [l.__dict__ for l in list_locks(root=root, cfg=cfg)]
                 mcp_cfg = load_mcp_config(root)
                 payload = {

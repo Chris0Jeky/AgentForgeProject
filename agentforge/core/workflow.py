@@ -211,7 +211,7 @@ def run_workflow(
     )
 
     # Locks acquired during run to ensure release on failure if desired
-    held_locks: List[str] = []
+    held_locks: Dict[str, str] = {}
     held_sticky: List[str] = []
 
     for i, step in enumerate(steps):
@@ -241,7 +241,7 @@ def run_workflow(
                 if not group:
                     raise WorkflowError("lock step requires group")
                 if action == "acquire":
-                    acquire_lock(
+                    info = acquire_lock(
                         root=root,
                         cfg=cfg,
                         group=group,
@@ -252,14 +252,13 @@ def run_workflow(
                         sticky=sticky,
                         branch=ws.branch if sticky else None,
                     )
-                    held_locks.append(group)
+                    held_locks[group] = info.lease_id
                     if sticky:
                         held_sticky.append(group)
                     record(i, stype, True, f"acquired {group}", sticky=sticky)
                 elif action == "release":
-                    release_lock(root=root, cfg=cfg, group=group, agent=ws.agent, task=ws.task, force=force)
-                    if group in held_locks:
-                        held_locks.remove(group)
+                    release_lock(root=root, cfg=cfg, group=group, agent=ws.agent, task=ws.task, force=force, lease_id=held_locks.get(group))
+                    held_locks.pop(group, None)
                     if group in held_sticky:
                         held_sticky.remove(group)
                     record(i, stype, True, f"released {group}")
@@ -333,6 +332,7 @@ def run_workflow(
                             pr_number=created.number,
                             branch=ws.branch,
                             force=False,
+                            lease_id=held_locks[g],
                         )
                     except Exception:
                         # Don't fail a workflow if the lock disappeared or was stolen.

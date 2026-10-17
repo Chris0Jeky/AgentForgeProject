@@ -39,12 +39,12 @@ def cmd_list(args: argparse.Namespace) -> int:
     root = find_repo_root(Path(args.repo) if args.repo else None)
     cfg, pol = load_repo_config(root)
     st_file, _ = state_paths(root, cfg)
-    wss = list_workspaces(st_file)
+    wss = list_workspaces(st_file, include_pending=True)
     if not wss:
         print("No workspaces tracked.")
         return 0
     for ws in wss:
-        print(f"- {ws.agent}:{ws.task}  path={ws.path}  branch={ws.branch}  port={ws.port}")
+        print(f"- {ws.agent}:{ws.task}  path={ws.path}  branch={ws.branch}  port={ws.port}  status={ws.status}")
     return 0
 
 def cmd_rm(args: argparse.Namespace) -> int:
@@ -59,7 +59,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     root = find_repo_root(Path(args.repo) if args.repo else None)
     cfg, pol = load_repo_config(root)
     st_file, _ = state_paths(root, cfg)
-    wss = list_workspaces(st_file)
+    wss = list_workspaces(st_file, include_pending=True)
     print("AgentForge status")
     print(policy_summary(pol))
     print("")
@@ -71,6 +71,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"    path:   {ws.path}")
         print(f"    branch: {ws.branch}")
         print(f"    port:   {ws.port}")
+        print(f"    status: {ws.status}")
         if ws.compose_project:
             print(f"    compose: {ws.compose_project}")
     return 0

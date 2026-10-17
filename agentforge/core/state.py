@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, Tuple
 
@@ -27,25 +27,35 @@ def save_state(state_file: Path, st: Dict[str, Any]) -> None:
 
 @contextmanager
 def state_lock(state_file: Path, timeout_sec: int = 10) -> Iterator[None]:
-    """Cross-platform lock using exclusive create of a lock file.
-
-    Not perfect, but good enough for a single-machine daemon + CLI calls.
-    """
+    """Process-owned lock; the OS releases ownership even after a crash."""
     lock = state_file.with_suffix(".lock")
-    start = time.time()
-    while True:
+    ensure_dir(lock.parent)
+    if os.name == "nt":
+        import msvcrt
+    else:
+        import fcntl
+    start = time.monotonic()
+    # Never unlink this file: waiters must all lock the same inode.
+    with lock.open("a+b") as f:
+        while True:
+            try:
+                if os.name == "nt":
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if time.monotonic() - start >= timeout_sec:
+                    raise TimeoutError(f"Timed out waiting for state lock: {lock}") from e
+                time.sleep(0.1)
         try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-            break
-        except FileExistsError:
-            if time.time() - start > timeout_sec:
-                raise TimeoutError(f"Timed out waiting for state lock: {lock}")
-            time.sleep(0.1)
-    try:
-        yield
-    finally:
-        try:
-            lock.unlink(missing_ok=True)  # py3.8+
-        except Exception:
-            pass
+            yield
+        finally:
+            if os.name == "nt":
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)

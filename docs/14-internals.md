@@ -10,12 +10,23 @@ It tracks:
 - workspaces (agent/task -> path/branch)
 - PR last processed comment ids
 
-State is locked via a lock file next to state.json.
+State writers use an OS-owned lock on `state.lock` next to `state.json` and atomic
+state replacement. The OS releases ownership when a process exits or is killed.
+The lock file stays on disk; do not delete it while processes may be using it.
 
 ## Workspace invariants
 - workspaces are created under `.worktrees/`
 - branches use `af/<agent>/<task>`
-- workspaces are disposable; remove+recreate is cheap
+- removal refuses dirty worktrees and preserves their state and port on failure
+
+Spawn reserves a port and saves a `spawning` record before creating a branch or
+worktree. It marks the record `active` only after metadata and env setup succeed.
+Removal saves `removing` intent and frees the record/port only after Git succeeds.
+`agentforge list` and `agentforge status` show pending records; automation uses only
+active workspaces. Retry the same `spawn` or `rm` command after interruption, or use
+`rm` to abandon a pending spawn. Retry checks Git's path/branch metadata and keeps
+the reservation if ownership is ambiguous. Branch deletion remains opt-in via
+`rm --delete-branch`, and that intent survives an interrupted removal.
 
 ## Execution model
 AgentForge is intentionally synchronous in v0.x:

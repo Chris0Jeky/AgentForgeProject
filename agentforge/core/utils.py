@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -55,12 +56,13 @@ def shell_cmd(command: str) -> List[str]:
             return ["powershell", "-NoProfile", "-Command", command]
     raise RuntimeError("No supported shell found (need bash/sh or PowerShell).")
 
-def run(cmd: List[str], *, cwd: Optional[Path]=None, env: Optional[Dict[str, str]]=None, capture: bool=False) -> Tuple[int, str, str]:
+def run(cmd: List[str], *, cwd: Optional[Path]=None, env: Optional[Dict[str, str]]=None, capture: bool=False, encoding: Optional[str]=None) -> Tuple[int, str, str]:
     p = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
         env=env,
         text=True,
+        encoding=encoding,
         capture_output=capture,
     )
     out = p.stdout or ""
@@ -69,14 +71,21 @@ def run(cmd: List[str], *, cwd: Optional[Path]=None, env: Optional[Dict[str, str
         raise CommandError(cmd, p.returncode, out, err)
     return p.returncode, out, err
 
-def out(cmd: List[str], *, cwd: Optional[Path]=None, env: Optional[Dict[str, str]]=None) -> str:
-    _, stdout, _ = run(cmd, cwd=cwd, env=env, capture=True)
+def out(cmd: List[str], *, cwd: Optional[Path]=None, env: Optional[Dict[str, str]]=None, encoding: Optional[str]=None) -> str:
+    _, stdout, _ = run(cmd, cwd=cwd, env=env, capture=True, encoding=encoding)
     return stdout.strip()
 
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 def atomic_write_text(path: Path, content: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
