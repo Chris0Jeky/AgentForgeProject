@@ -25,30 +25,30 @@ HIGH_RISK_CONTENT_PATTERNS = [
     re.compile(r"(?i)AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY"),
 ]
 
-def git_diff_text(ws_path: Path, base_ref: str = "origin/main") -> str:
-    # Use three-dot to diff against merge base
-    return out(["git", "diff", "--patch", f"{base_ref}...HEAD"], cwd=ws_path)
+def git_diff_text(ws_path: Path, base_ref: str = "origin/main", *, target_ref: str = "HEAD") -> str:
+    base = out(["git", "merge-base", base_ref, "HEAD"], cwd=ws_path)
+    return out(["git", "diff", "--patch", "--no-ext-diff", "--no-textconv", base, target_ref, "--"], cwd=ws_path)
 
-def changed_files(ws_path: Path, base_ref: str = "origin/main") -> List[str]:
-    txt = out(["git", "diff", "--name-only", f"{base_ref}...HEAD"], cwd=ws_path)
-    return [x.strip() for x in txt.splitlines() if x.strip()]
+def changed_files(ws_path: Path, base_ref: str = "origin/main", *, target_ref: str = "HEAD") -> List[str]:
+    base = out(["git", "merge-base", base_ref, "HEAD"], cwd=ws_path)
+    # Disable rename folding so both the deleted source and added destination are checked.
+    txt = out(["git", "diff", "--name-status", "-z", "--no-renames", base, target_ref, "--"], cwd=ws_path)
+    return txt.split("\0")[1::2]
 
-def numstat_total_changed(ws_path: Path, base_ref: str = "origin/main") -> int:
+def numstat_total_changed(ws_path: Path, base_ref: str = "origin/main", *, target_ref: str = "HEAD") -> int:
     """Total changed lines (added + deleted) from git numstat."""
-    txt = out(["git", "diff", "--numstat", f"{base_ref}...HEAD"], cwd=ws_path)
+    base = out(["git", "merge-base", base_ref, "HEAD"], cwd=ws_path)
+    txt = out(["git", "diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base, target_ref, "--"], cwd=ws_path)
     total = 0
-    for line in txt.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 3:
+    for line in txt.split("\0"):
+        if not line:
             continue
+        parts = line.split("\t", 2)
         a, d, _ = parts[0], parts[1], parts[2]
         # '-' indicates binary
         if a == "-" or d == "-":
             return 10**9
-        try:
-            total += int(a) + int(d)
-        except ValueError:
-            continue
+        total += int(a) + int(d)
     return total
 
 def scan_diff_text(*, diff_text: str, changed_files: List[str]) -> List[Finding]:
@@ -66,7 +66,7 @@ def scan_diff_text(*, diff_text: str, changed_files: List[str]) -> List[Finding]
         findings.append(Finding("medium", f"Large diff ({lines} lines)"))
     return findings
 
-def scan_diff(ws_path: Path, base_ref: str = "origin/main") -> List[Finding]:
-    files = changed_files(ws_path, base_ref=base_ref)
-    diff = git_diff_text(ws_path, base_ref=base_ref)
+def scan_diff(ws_path: Path, base_ref: str = "origin/main", *, target_ref: str = "HEAD") -> List[Finding]:
+    files = changed_files(ws_path, base_ref=base_ref, target_ref=target_ref)
+    diff = git_diff_text(ws_path, base_ref=base_ref, target_ref=target_ref)
     return scan_diff_text(diff_text=diff, changed_files=files)

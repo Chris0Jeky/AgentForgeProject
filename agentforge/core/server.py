@@ -28,6 +28,7 @@ from .mcp import (
     docker_profile_server_add,
     docker_profile_server_remove,
     ensure_gateway_running,
+    gateway_status,
     list_gateways,
     stop_gateway,
 )
@@ -77,11 +78,15 @@ def serve_status(
     - when enable_actions=True, POST endpoints require Authorization: Bearer <token>
     - SSE (/api/run/stream) is read-only and does not require auth; run_id is unguessable
     """
+    if enable_actions:
+        if host not in {"127.0.0.1", "localhost"}:
+            raise ValueError("Actions require a loopback bind (127.0.0.1 or localhost).")
+        host = "127.0.0.1"
     token = token or secrets.token_hex(16)
 
     def _check_auth(handler: BaseHTTPRequestHandler) -> bool:
         if not enable_actions:
-            return True
+            return False
         auth = handler.headers.get("Authorization") or ""
         want = f"Bearer {token}"
         return secrets.compare_digest(auth.strip(), want)
@@ -344,7 +349,6 @@ button.danger {{ background: #b91c1c; border-color: #b91c1c; color: white; }}
 </main>
 
 <script>
-const TOKEN = {json.dumps(token)};
 const ACTIONS_ENABLED = {json.dumps(bool(enable_actions))};
 
 function showTab(name) {{
@@ -370,7 +374,7 @@ async function apiPost(path, body) {{
     'Content-Type': 'application/json'
   }};
   if (ACTIONS_ENABLED) {{
-    headers['Authorization'] = 'Bearer ' + TOKEN;
+    headers['Authorization'] = 'Bearer ' + (window.prompt('Enter the action token printed by AgentForge:') || '');
   }}
   const r = await fetch(path, {{
     method: 'POST',
@@ -730,7 +734,22 @@ refresh();
             # Keep server quiet by default; comment out for debugging.
             return
 
+        def _check_local_request(self) -> bool:
+            if not enable_actions:
+                return True
+            authority = self.headers.get("Host", "").lower()
+            allowed = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+            origin = self.headers.get("Origin")
+            if (len(self.headers.get_all("Host", [])) != 1 or authority not in allowed
+                    or len(self.headers.get_all("Origin", [])) > 1
+                    or (origin is not None and origin != f"http://{authority}")):
+                _json(self, 403, {"ok": False, "error": "local origin required"})
+                return False
+            return True
+
         def do_GET(self) -> None:
+            if not self._check_local_request():
+                return
             parsed = urlparse(self.path)
             path = parsed.path
             qs = parse_qs(parsed.query or "")
@@ -912,16 +931,37 @@ refresh();
             return
 
         def do_POST(self) -> None:
+            if not enable_actions:
+                _json(self, 403, {"ok": False, "error": "actions disabled"})
+                return
+            if not self._check_local_request():
+                return
+            if not _check_auth(self):
+                _unauthorized(self)
+                return
             parsed = urlparse(self.path)
             path = parsed.path
 
             # Read request body
-            length = int(self.headers.get("Content-Length") or "0")
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = -1
+            if (length < 0 or self.headers.get("Transfer-Encoding") is not None
+                    or len(self.headers.get_all("Content-Length", [])) > 1):
+                _json(self, 400, {"ok": False, "error": "invalid request length"})
+                return
+            if length > 1024 * 1024:
+                _json(self, 413, {"ok": False, "error": "request too large"})
+                return
             raw = self.rfile.read(length) if length else b""
             try:
                 body = json.loads(raw.decode("utf-8")) if raw else {}
-            except Exception:
-                body = {}
+                if not isinstance(body, dict):
+                    raise ValueError("expected an object")
+            except (ValueError, UnicodeDecodeError):
+                _json(self, 400, {"ok": False, "error": "invalid JSON object"})
+                return
 
             def require_auth() -> bool:
                 if _check_auth(self):
@@ -1160,7 +1200,7 @@ refresh();
                 try:
                     mcfg = load_mcp_config(root)
                     gw = ensure_gateway_running(root, cfg, mcfg, key=key, transport=transport)
-                    _json(self, 200, {"ok": True, "gateway": gw})
+                    _json(self, 200, {"ok": True, "gateway": gateway_status(gw)})
                 except Exception as e:
                     _json(self, 500, {"ok": False, "error": str(e)})
                 return

@@ -31,9 +31,16 @@ def _load_env(ws_path: Path) -> Dict[str, str]:
 def _git_has_changes(ws_path: Path) -> bool:
     return bool(out(["git", "status", "--porcelain"], cwd=ws_path).strip())
 
-def _git_commit_all(ws_path: Path, message: str) -> None:
+def _git_commit_all(ws_path: Path, message: str, *, expected_head: str, expected_tree: str) -> str:
     run(["git", "add", "-A"], cwd=ws_path)
+    if (out(["git", "rev-parse", "HEAD"], cwd=ws_path) != expected_head
+            or out(["git", "write-tree"], cwd=ws_path) != expected_tree):
+        raise SystemExit("HEAD or index changed after the safety scan; refusing to commit.")
     run(["git", "commit", "-m", message], cwd=ws_path)
+    head = out(["git", "rev-parse", "HEAD"], cwd=ws_path)
+    if out(["git", "rev-parse", f"{head}^", f"{head}^{{tree}}"], cwd=ws_path).splitlines() != [expected_head, expected_tree]:
+        raise SystemExit("Commit differs from the safety scan; refusing to push.")
+    return head
 
 def _git_push(ws_path: Path, branch: str, remote: str="origin") -> None:
     run(["git", "push", "-u", remote, branch], cwd=ws_path)
@@ -191,8 +198,14 @@ def run_agent_role(
                 f"Out-of-scope files:\n{details}"
             )
 
+    # Freeze the complete proposed commit, including pending and untracked files.
+    run(["git", "add", "-A"], cwd=ws_path)
+    scanned_head = out(["git", "rev-parse", "HEAD"], cwd=ws_path)
+    scanned_tree = out(["git", "write-tree"], cwd=ws_path)
+    scan_base = out(["git", "merge-base", cfg.default_base_ref, scanned_head], cwd=ws_path)
+
     # Guardrails: policy glob enforcement
-    files = changed_files(ws_path, base_ref=cfg.default_base_ref)
+    files = changed_files(ws_path, base_ref=scan_base, target_ref=scanned_tree)
     glob_findings = evaluate_policy_globs(
         changed_files=files,
         forbid_globs=pol.forbid_globs or [],
@@ -210,7 +223,7 @@ def run_agent_role(
         raise SystemExit("Guardrail blocks:\n" + msg)
 
     # Guardrails: diff scan patterns
-    findings = scan_diff(ws_path, base_ref=cfg.default_base_ref)
+    findings = scan_diff(ws_path, base_ref=scan_base, target_ref=scanned_tree)
     high = [f for f in findings if f.severity == "high"]
     if high:
         msg = "\n".join(f"- {f.message}" for f in high)
@@ -220,7 +233,7 @@ def run_agent_role(
         )
 
     # Guardrails: max changed lines
-    total_changed = numstat_total_changed(ws_path, base_ref=cfg.default_base_ref)
+    total_changed = numstat_total_changed(ws_path, base_ref=scan_base, target_ref=scanned_tree)
     if total_changed > pol.max_changed_lines:
         raise SystemExit(f"Diff too large ({total_changed} changed lines) > policy max_changed_lines={pol.max_changed_lines}")
 
@@ -229,8 +242,14 @@ def run_agent_role(
         run_harness_step(root, cfg, ws, step="check", extra_env=None)
 
     # Auto commit/push
+    publish_head = scanned_head
     if auto_commit and pol.allow_auto_commit and role in ["implement", "fix"]:
         if _git_has_changes(ws_path):
-            _git_commit_all(ws_path, message=f"[{ws.agent}] {role}: {ws.task}")
+            publish_head = _git_commit_all(ws_path, message=f"[{ws.agent}] {role}: {ws.task}",
+                                           expected_head=scanned_head, expected_tree=scanned_tree)
     if auto_push and pol.allow_auto_push and role in ["implement", "fix"]:
+        if (out(["git", "rev-parse", "HEAD"], cwd=ws_path) != publish_head
+                or out(["git", "rev-parse", "HEAD^{tree}"], cwd=ws_path) != scanned_tree
+                or out(["git", "rev-parse", f"refs/heads/{ws.branch}"], cwd=ws_path) != publish_head):
+            raise SystemExit("Push does not match the safety scan; commit and rescan first.")
         _git_push(ws_path, ws.branch, remote=cfg.default_remote)

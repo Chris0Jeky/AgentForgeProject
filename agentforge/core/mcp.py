@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 try:
     import tomllib  # py3.11+
@@ -256,8 +257,23 @@ def _find_free_port(host: str, start: int, end: int) -> int:
         return int(s.getsockname()[1])
 
 
+def gateway_status(info: Dict[str, Any]) -> Dict[str, Any]:
+    """Public status only; credentials stay in the private gateway store."""
+    status = {k: info[k] for k in ("key", "profile", "transport", "pid") if k in info}
+    status["url"] = ""
+    try:
+        url = urlsplit(str(info.get("url") or ""))
+        if url.scheme in {"http", "https"} and url.hostname:
+            host = f"[{url.hostname}]" if ":" in url.hostname else url.hostname
+            port = f":{url.port}" if url.port is not None else ""
+            status["url"] = f"{url.scheme}://{host}{port}"
+    except ValueError:
+        pass
+    return status
+
+
 def list_gateways(root: Path, cfg) -> List[Dict[str, Any]]:
-    """List known gateways (best-effort). Removes stale entries."""
+    """List public gateway status (best-effort). Removes stale entries."""
     gws = _load_gateways(root, cfg)
     changed = False
     out: List[Dict[str, Any]] = []
@@ -267,7 +283,7 @@ def list_gateways(root: Path, cfg) -> List[Dict[str, Any]]:
             del gws[k]
             changed = True
             continue
-        out.append(dict(v))
+        out.append(gateway_status(v))
     if changed:
         _save_gateways(root, cfg, gws)
     out.sort(key=lambda x: str(x.get("key") or ""))
