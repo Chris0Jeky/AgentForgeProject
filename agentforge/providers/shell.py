@@ -27,4 +27,4 @@ class ShellProvider:
             run(shell_cmd(prompt), cwd=cwd, env=merged, capture=False)
             return RunResult(ok=True)
         except CommandError as e:
-            return RunResult(ok=False, stdout=e.stdout, stderr=e.stderr)
+            return RunResult(ok=False, stdout=e.stdout, stderr=e.stderr, returncode=e.returncode)

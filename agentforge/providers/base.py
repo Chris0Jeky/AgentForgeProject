@@ -9,6 +9,15 @@ class RunResult:
     ok: bool
     stdout: str = ""
     stderr: str = ""
+    returncode: Optional[int] = None
+
+
+class ProviderFailure(RuntimeError):
+    def __init__(self, provider: str, result: RunResult):
+        self.provider = provider
+        self.returncode = result.returncode
+        self.stderr = result.stderr[:2000]
+        super().__init__(f"Provider {provider} failed (exit {self.returncode}): {self.stderr}")
 
 class Provider(Protocol):
     name: str

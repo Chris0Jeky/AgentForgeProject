@@ -11,6 +11,7 @@ from .diffscan import scan_diff, git_diff_text, changed_files, numstat_total_cha
 from .guardrails import evaluate_policy_globs
 from .utils import out, run
 from agentforge.providers import get_provider
+from agentforge.providers.base import ProviderFailure
 from .mcp import load_mcp_config, ensure_gateway_running
 from .guardrails import matches_any_glob
 
@@ -185,7 +186,7 @@ def run_agent_role(
 
     res = prov.run(prompt=prompt, cwd=ws_path, env=env)
     if not res.ok:
-        raise SystemExit(f"Provider {provider} failed: {res.stderr}")
+        raise ProviderFailure(provider, res)
 
     if surgical:
         changed_now = _working_tree_changed_files(ws_path)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -210,194 +211,205 @@ def run_workflow(
         }
     )
 
-    # Locks acquired during run to ensure release on failure if desired
+    # Stable work identity is metadata; each running invocation owns a distinct lease.
+    lease_task = f"{ws.task}@{secrets.token_hex(16)}"
     held_locks: List[str] = []
     held_sticky: List[str] = []
 
-    for i, step in enumerate(steps):
-        stype = str(step.get("type") or "").strip().lower()
-        if not stype:
-            record(i, "unknown", False, "Missing step.type")
-            raise WorkflowError(f"Step {i} missing 'type'")
-
-        enabled = _eval_bool(step.get("enabled", True), ctx, default=True)
-        if not enabled:
-            record(i, stype, True, "skipped")
-            continue
-
-        if dry_run:
-            record(i, stype, True, f"DRY RUN: {step}")
-            continue
-
-        emit({"type": "step_start", "step_index": i, "step_type": stype, "step": step})
-
-        try:
-            if stype == "lock":
-                action = str(step.get("action") or "acquire").lower()
-                group = _fmt(str(step.get("group") or "").strip(), ctx)
-                ttl = int(step.get("ttl_sec") or 6 * 60 * 60)
-                force = bool(step.get("force") or False)
-                sticky = _eval_bool(step.get("sticky", False), ctx, default=False)
-                if not group:
-                    raise WorkflowError("lock step requires group")
-                if action == "acquire":
-                    acquire_lock(
-                        root=root,
-                        cfg=cfg,
-                        group=group,
-                        agent=ws.agent,
-                        task=ws.task,
-                        ttl_sec=ttl,
-                        force=force,
-                        sticky=sticky,
-                        branch=ws.branch if sticky else None,
-                    )
-                    held_locks.append(group)
-                    if sticky:
-                        held_sticky.append(group)
-                    record(i, stype, True, f"acquired {group}", sticky=sticky)
-                elif action == "release":
-                    release_lock(root=root, cfg=cfg, group=group, agent=ws.agent, task=ws.task, force=force)
-                    if group in held_locks:
-                        held_locks.remove(group)
-                    if group in held_sticky:
-                        held_sticky.remove(group)
-                    record(i, stype, True, f"released {group}")
-                else:
-                    raise WorkflowError(f"Unknown lock action: {action}")
-
-            elif stype == "harness":
-                name = str(step.get("name") or step.get("step") or "check")
-                ok = run_harness_step(root=root, cfg=cfg, ws=ws, step=name)
-                if not ok:
-                    raise WorkflowError(f"Harness step failed: {name}")
-                record(i, stype, True, f"harness {name} ok")
-
-            elif stype == "agent":
-                role = str(step.get("role") or "implement")
-                provider = str(step.get("provider") or provider_default)
-                prompt = _read_prompt(step, root, ws_path, ctx)
-                auto_commit = bool(step.get("auto_commit") if "auto_commit" in step else pol.allow_auto_commit)
-                auto_push = bool(step.get("auto_push") if "auto_push" in step else pol.allow_auto_push)
-                raw_allow = step.get("allowed_edit_globs", step.get("allow_edit_globs", []))
-                allowed_edit_globs: List[str] = []
-                if isinstance(raw_allow, list):
-                    allowed_edit_globs = [_fmt(str(x), ctx) for x in raw_allow if str(x).strip()]
-                elif raw_allow is not None and str(raw_allow).strip():
-                    allowed_edit_globs = [_fmt(str(raw_allow), ctx)]
-                surgical = _eval_bool(
-                    step.get("surgical", bool(allowed_edit_globs)),
-                    ctx,
-                    default=bool(allowed_edit_globs),
-                )
-                run_agent_role(
-                    root,
-                    cfg,
-                    pol,
-                    ws,
-                    provider=provider,
-                    role=role,
-                    prompt=prompt,
-                    auto_commit=auto_commit,
-                    auto_push=auto_push,
-                    surgical=surgical,
-                    allowed_edit_globs=allowed_edit_globs,
-                )
-                sg = f" surgical={surgical}" if surgical else ""
-                record(i, stype, True, f"agent role={role} provider={provider}{sg}")
-
-            elif stype == "pr":
-                action = str(step.get("action") or "create").lower()
-                if action != "create":
-                    raise WorkflowError("Only pr action=create supported in v0.3")
-                title = _fmt(str(step.get("title") or f"[{ws.agent}] {ws.task}"), ctx)
-                body = _fmt(str(step.get("body") or "Automated by AgentForge."), ctx)
-                draft_raw = step.get("draft") if "draft" in step else True
-                draft = _eval_bool(draft_raw, ctx, default=True)
-                base_branch = str(step.get("base") or cfg.default_base_branch)
-                created = create_pr(ws_path=ws_path, title=title, body=body, base=base_branch, head=ws.branch, draft=draft)
-                pr_url = created.url
-                ctx["pr_url"] = pr_url
-                ctx["pr_number"] = created.number
-
-                # Attach PR metadata to sticky locks (best-effort)
-                for g in list(held_sticky):
-                    try:
-                        mark_lock_sticky(
+    try:
+        for i, step in enumerate(steps):
+            stype = "unknown"
+            try:
+                stype = str(step.get("type") or "").strip().lower()
+                if not stype:
+                    raise WorkflowError(f"Step {i} missing 'type'")
+                enabled = _eval_bool(step.get("enabled", True), ctx, default=True)
+                if not enabled:
+                    record(i, stype, True, "skipped")
+                    continue
+                if dry_run:
+                    record(i, stype, True, f"DRY RUN: {step}")
+                    continue
+                emit({"type": "step_start", "step_index": i, "step_type": stype, "step": step})
+                if stype == "lock":
+                    action = str(step.get("action") or "acquire").lower()
+                    group = _fmt(str(step.get("group") or "").strip(), ctx)
+                    ttl = int(step.get("ttl_sec") or 6 * 60 * 60)
+                    force = bool(step.get("force") or False)
+                    sticky = _eval_bool(step.get("sticky", False), ctx, default=False)
+                    if not group:
+                        raise WorkflowError("lock step requires group")
+                    if action == "acquire":
+                        acquire_lock(
                             root=root,
                             cfg=cfg,
-                            group=g,
+                            group=group,
                             agent=ws.agent,
-                            task=ws.task,
-                            sticky=True,
-                            pr_number=created.number,
-                            branch=ws.branch,
-                            force=False,
+                            task=lease_task,
+                            ttl_sec=ttl,
+                            force=force,
+                            sticky=sticky,
+                            branch=ws.branch if sticky else None,
+                            meta={"logical_task": ws.task, "invocation": lease_task},
                         )
-                    except Exception:
-                        # Don't fail a workflow if the lock disappeared or was stolen.
-                        pass
+                        if group not in held_locks:
+                            held_locks.append(group)
+                        if sticky:
+                            held_sticky.append(group)
+                        record(i, stype, True, f"acquired {group}", sticky=sticky)
+                    elif action == "release":
+                        if group not in held_locks:
+                            raise WorkflowError(f"No lease acquired by this invocation for {group}")
+                        release_lock(root=root, cfg=cfg, group=group, agent=ws.agent, task=lease_task, force=False)
+                        if group in held_locks:
+                            held_locks.remove(group)
+                        if group in held_sticky:
+                            held_sticky.remove(group)
+                        record(i, stype, True, f"released {group}")
+                    else:
+                        raise WorkflowError(f"Unknown lock action: {action}")
 
-                record(i, stype, True, f"created {pr_url}", pr_number=created.number)
+                elif stype == "harness":
+                    name = str(step.get("name") or step.get("step") or "check")
+                    ok = run_harness_step(root=root, cfg=cfg, ws=ws, step=name)
+                    if not ok:
+                        raise WorkflowError(f"Harness step failed: {name}")
+                    record(i, stype, True, f"harness {name} ok")
 
-            elif stype == "comment":
-                prn = step.get("pr_number")
-                # If not provided, infer from current branch.
-                pr_number = int(_fmt(str(prn), ctx)) if prn is not None else _get_pr_number(ws_path)
-                if not pr_number:
-                    raise WorkflowError("Could not determine PR number for comment step")
-                body = _fmt(str(step.get("body") or ""), ctx)
-                if not body:
-                    body = "AgentForge: (empty comment)"
-                post_pr_comment(int(pr_number), body)
-                record(i, stype, True, f"commented on PR #{pr_number}")
+                elif stype == "agent":
+                    role = str(step.get("role") or "implement")
+                    provider = str(step.get("provider") or provider_default)
+                    prompt = _read_prompt(step, root, ws_path, ctx)
+                    auto_commit = bool(step.get("auto_commit") if "auto_commit" in step else pol.allow_auto_commit)
+                    auto_push = bool(step.get("auto_push") if "auto_push" in step else pol.allow_auto_push)
+                    raw_allow = step.get("allowed_edit_globs", step.get("allow_edit_globs", []))
+                    allowed_edit_globs: List[str] = []
+                    if isinstance(raw_allow, list):
+                        allowed_edit_globs = [_fmt(str(x), ctx) for x in raw_allow if str(x).strip()]
+                    elif raw_allow is not None and str(raw_allow).strip():
+                        allowed_edit_globs = [_fmt(str(raw_allow), ctx)]
+                    surgical = _eval_bool(
+                        step.get("surgical", bool(allowed_edit_globs)),
+                        ctx,
+                        default=bool(allowed_edit_globs),
+                    )
+                    run_agent_role(
+                        root,
+                        cfg,
+                        pol,
+                        ws,
+                        provider=provider,
+                        role=role,
+                        prompt=prompt,
+                        auto_commit=auto_commit,
+                        auto_push=auto_push,
+                        surgical=surgical,
+                        allowed_edit_globs=allowed_edit_globs,
+                    )
+                    sg = f" surgical={surgical}" if surgical else ""
+                    record(i, stype, True, f"agent role={role} provider={provider}{sg}")
 
-            elif stype == "sleep":
-                sec = float(step.get("sec") or 1)
-                time.sleep(sec)
-                record(i, stype, True, f"slept {sec}s")
+                elif stype == "pr":
+                    action = str(step.get("action") or "create").lower()
+                    if action != "create":
+                        raise WorkflowError("Only pr action=create supported in v0.3")
+                    title = _fmt(str(step.get("title") or f"[{ws.agent}] {ws.task}"), ctx)
+                    body = _fmt(str(step.get("body") or "Automated by AgentForge."), ctx)
+                    draft_raw = step.get("draft") if "draft" in step else True
+                    draft = _eval_bool(draft_raw, ctx, default=True)
+                    base_branch = str(step.get("base") or cfg.default_base_branch)
+                    created = create_pr(ws_path=ws_path, title=title, body=body, base=base_branch, head=ws.branch, draft=draft)
+                    pr_url = created.url
+                    ctx["pr_url"] = pr_url
+                    ctx["pr_number"] = created.number
 
-            elif stype == "note":
-                msg = _fmt(str(step.get("message") or ""), ctx)
-                record(i, stype, True, msg)
+                    # Attach PR metadata to sticky locks (best-effort)
+                    for g in list(held_sticky):
+                        try:
+                            mark_lock_sticky(
+                                root=root,
+                                cfg=cfg,
+                                group=g,
+                                agent=ws.agent,
+                                task=lease_task,
+                                sticky=True,
+                                pr_number=created.number,
+                                branch=ws.branch,
+                                force=False,
+                            )
+                        except Exception:
+                            # Don't fail a workflow if the lock disappeared or was stolen.
+                            pass
 
-            elif stype == "mcp_gateway":
-                # Optional: ensure an MCP Gateway is running (Docker MCP Toolkit).
-                action = str(step.get("action") or "ensure").lower()
-                scope = str(step.get("scope") or "workspace").lower()  # workspace | repo
-                transport = str(step.get("transport") or "").strip() or None
-                if action not in ["ensure", "start", "stop"]:
-                    raise WorkflowError(f"Unknown mcp_gateway action: {action}")
+                    record(i, stype, True, f"created {pr_url}", pr_number=created.number)
 
-                from .mcp import load_mcp_config, ensure_gateway_running, stop_gateway
+                elif stype == "comment":
+                    prn = step.get("pr_number")
+                    # If not provided, infer from current branch.
+                    pr_number = int(_fmt(str(prn), ctx)) if prn is not None else _get_pr_number(ws_path)
+                    if not pr_number:
+                        raise WorkflowError("Could not determine PR number for comment step")
+                    body = _fmt(str(step.get("body") or ""), ctx)
+                    if not body:
+                        body = "AgentForge: (empty comment)"
+                    post_pr_comment(int(pr_number), body)
+                    record(i, stype, True, f"commented on PR #{pr_number}")
 
-                mcfg = load_mcp_config(root)
-                if action in ["ensure", "start"]:
-                    key = None if scope == "repo" else f"{ws.agent}::{ws.task}"
-                    gw = ensure_gateway_running(root, cfg, mcfg, key=key, transport=transport)
-                    # Expose to downstream steps
-                    if gw.get("url"):
-                        ctx["mcp_gateway_url"] = gw["url"]
-                    if gw.get("auth_token"):
-                        ctx["mcp_gateway_auth_token"] = gw["auth_token"]
-                    ctx["mcp_profile"] = gw.get("profile") or mcfg.profile
-                    record(i, stype, True, f"gateway running ({gw.get('transport')})", url=gw.get("url"))
-                else:  # stop
-                    key = None if scope == "repo" else f"{ws.agent}::{ws.task}"
-                    stop_gateway(root, cfg, key=key)
-                    record(i, stype, True, "gateway stopped")
+                elif stype == "sleep":
+                    sec = float(step.get("sec") or 1)
+                    time.sleep(sec)
+                    record(i, stype, True, f"slept {sec}s")
 
-            else:
-                raise WorkflowError(f"Unknown step type: {stype}")
+                elif stype == "note":
+                    msg = _fmt(str(step.get("message") or ""), ctx)
+                    record(i, stype, True, msg)
 
-        except LockTakenError as e:
-            record(i, stype, False, str(e), holder=e.holder.__dict__)
-            # Stop workflow; locks remain held (by someone else) anyway.
-            break
-        except Exception as e:
-            record(i, stype, False, str(e))
-            # Stop workflow on first failure. (Workflows can model retries explicitly.)
-            break
+                elif stype == "mcp_gateway":
+                    # Optional: ensure an MCP Gateway is running (Docker MCP Toolkit).
+                    action = str(step.get("action") or "ensure").lower()
+                    scope = str(step.get("scope") or "workspace").lower()  # workspace | repo
+                    transport = str(step.get("transport") or "").strip() or None
+                    if action not in ["ensure", "start", "stop"]:
+                        raise WorkflowError(f"Unknown mcp_gateway action: {action}")
+
+                    from .mcp import load_mcp_config, ensure_gateway_running, stop_gateway
+
+                    mcfg = load_mcp_config(root)
+                    if action in ["ensure", "start"]:
+                        key = None if scope == "repo" else f"{ws.agent}::{ws.task}"
+                        gw = ensure_gateway_running(root, cfg, mcfg, key=key, transport=transport)
+                        # Expose to downstream steps
+                        if gw.get("url"):
+                            ctx["mcp_gateway_url"] = gw["url"]
+                        if gw.get("auth_token"):
+                            ctx["mcp_gateway_auth_token"] = gw["auth_token"]
+                        ctx["mcp_profile"] = gw.get("profile") or mcfg.profile
+                        record(i, stype, True, f"gateway running ({gw.get('transport')})", url=gw.get("url"))
+                    else:  # stop
+                        key = None if scope == "repo" else f"{ws.agent}::{ws.task}"
+                        stop_gateway(root, cfg, key=key)
+                        record(i, stype, True, "gateway stopped")
+
+                else:
+                    raise WorkflowError(f"Unknown step type: {stype}")
+
+            except LockTakenError as e:
+                record(i, stype, False, str(e), holder=e.holder.__dict__)
+                # Stop workflow; locks remain held (by someone else) anyway.
+                break
+            except (Exception, SystemExit) as e:
+                record(i, stype, False, str(e))
+                # Stop workflow on first failure. (Workflows can model retries explicitly.)
+                break
+    finally:
+        for group in reversed(held_locks):
+            if group in held_sticky:
+                continue
+            try:
+                release_lock(root=root, cfg=cfg, group=group, agent=ws.agent, task=lease_task, force=False)
+            except Exception as e:
+                record(len(steps), "lock.cleanup", False,
+                       f"Cleanup failed for {group}, owner {ws.agent}:{lease_task}; reconcile retained lease: {e}")
 
     finished = int(time.time())
     summary = WorkflowRunSummary(

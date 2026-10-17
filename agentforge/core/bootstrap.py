@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import time
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from .file_mutex import file_mutex
 from .config import RepoConfig, Policy
 from .preflight import check_tools, print_preflight
-from .queue import list_issues, view_issue_body, claim_issue
+from .queue import Issue, list_issues, view_issue_body, claim_issue
 from .workspace import spawn_workspace, list_workspaces
 from .workflow import run_workflow
 from .locks import load_lock_groups, select_lock_group_for_issue
 from .utils import out, run, which
-from .state import state_paths
+from .state import state_paths, state_lock, load_state, save_state
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,11 @@ def build_plan_from_queue(
     """
     label = label or cfg.queue_label
     issues = list_issues(label=label, limit=50)
+    claims = load_state(root / cfg.state_dir / "state.json").get("bootstrap_claims", {})
+    issues = [iss for iss in issues if claims.get(str(iss.number), {}).get("state") != "completed"]
+    for number, receipt in claims.items():
+        if receipt["state"] != "completed" and not any(iss.number == int(number) for iss in issues):
+            issues.append(Issue(int(number), receipt["issue_title"], receipt["issue_url"], receipt["issue_labels"]))
 
     if not issues:
         return []
@@ -61,7 +67,7 @@ def build_plan_from_queue(
     groups = load_lock_groups(root)
 
     def plan_item(idx: int, iss) -> BootstrapPlanItem:
-        agent_name = agents[idx % len(agents)]
+        agent_name = claims.get(str(iss.number), {}).get("agent") or agents[idx % len(agents)]
         task_name = f"issue-{iss.number}"
 
         spec = select_lock_group_for_issue(
@@ -205,73 +211,145 @@ def run_bootstrap(
         }
     )
 
+    track_claim = claim
+
+    def update_claim(it: BootstrapPlanItem, **patch: Any) -> None:
+        if track_claim:
+            with state_lock(st_file):
+                st = load_state(st_file)
+                st["bootstrap_claims"][str(it.issue_number)].update(patch)
+                save_state(st_file, st)
+
     # Execute plan
     existing = {(ws.agent, ws.task) for ws in list_workspaces(st_file)}
     ok_all = True
 
     for it in plan:
-        emit({"type": "bootstrap_item_start", "agent": it.agent, "task": it.task, "issue_number": it.issue_number, "lock_group": it.lock_group, "workflow": it.workflow})
+        try:
+            with file_mutex(st_file.with_name(f"bootstrap-issue-{it.issue_number}.mutex"), timeout=0):
+                emit({"type": "bootstrap_item_start", "agent": it.agent, "task": it.task, "issue_number": it.issue_number, "lock_group": it.lock_group, "workflow": it.workflow})
 
-        # If workspace already exists, skip spawn
-        if (it.agent, it.task) not in existing:
-            ws = spawn_workspace(root, cfg, pol, st_file, agent=it.agent, task=it.task, base_ref=cfg.default_base_ref)
-            existing.add((it.agent, it.task))
-            emit({"type": "workspace_spawned", "agent": it.agent, "task": it.task, "path": ws.path, "branch": ws.branch})
-        else:
-            ws = [w for w in list_workspaces(st_file) if w.agent == it.agent and w.task == it.task][0]
-            emit({"type": "workspace_exists", "agent": it.agent, "task": it.task, "path": ws.path, "branch": ws.branch})
+                with state_lock(st_file):
+                    prior_claim = load_state(st_file).get("bootstrap_claims", {}).get(str(it.issue_number))
+                track_claim = claim or prior_claim is not None
+                if track_claim:
+                    with state_lock(st_file):
+                        st = load_state(st_file)
+                        claims = st.setdefault("bootstrap_claims", {})
+                        receipt = claims.get(str(it.issue_number))
+                        if receipt is None:
+                            receipt = {**it.__dict__, "attempt_id": secrets.token_hex(16), "state": "admitted",
+                                       "workspace": None, "branch": None}
+                            claims[str(it.issue_number)] = receipt
+                        elif receipt["state"] == "executing":
+                            receipt.update(state="reconciliation_required", diagnostic="Interrupted workflow; reconcile branch and PR before retrying.")
+                        receipt = dict(receipt)
+                        save_state(st_file, st)
+                    if (receipt["agent"], receipt["task"]) != (it.agent, it.task):
+                        ok_all = False
+                        log(f"[BLOCKED] #{it.issue_number}: retained claim belongs to {receipt['agent']}:{receipt['task']}.")
+                        continue
+                    if receipt["state"] == "labels_pending":
+                        try:
+                            claim_issue(number=it.issue_number, from_label=cfg.queue_label, to_label=cfg.in_progress_label)
+                            update_claim(it, state="completed")
+                        except Exception as e:
+                            ok_all = False
+                            update_claim(it, diagnostic=str(e)[:2000])
+                        continue
+                    if receipt["state"] != "admitted":
+                        ok_all = False
+                        emit({"type": "bootstrap_item_end", "agent": it.agent, "task": it.task,
+                              "issue_number": it.issue_number, "ok": False, "claim": receipt})
+                        log(f"[BLOCKED] #{it.issue_number} attempt {receipt['attempt_id']}: reconcile retained claim before retrying.")
+                        continue
 
-        if claim:
-            msg = f"Claimed by AgentForge agent '{it.agent}' on host at {time.strftime('%Y-%m-%d %H:%M:%S')}."
-            claim_issue(number=it.issue_number, from_label=cfg.queue_label, to_label=cfg.in_progress_label, comment=msg)
-            emit({"type": "issue_claimed", "issue_number": it.issue_number, "from_label": cfg.queue_label, "to_label": cfg.in_progress_label})
+                try:
+                    # If workspace already exists, skip spawn
+                    if (it.agent, it.task) not in existing:
+                        ws = spawn_workspace(root, cfg, pol, st_file, agent=it.agent, task=it.task, base_ref=cfg.default_base_ref)
+                        existing.add((it.agent, it.task))
+                        emit({"type": "workspace_spawned", "agent": it.agent, "task": it.task, "path": ws.path, "branch": ws.branch})
+                    else:
+                        ws = [w for w in list_workspaces(st_file) if w.agent == it.agent and w.task == it.task][0]
+                        emit({"type": "workspace_exists", "agent": it.agent, "task": it.task, "path": ws.path, "branch": ws.branch})
 
-        if fast:
-            body = view_issue_body(it.issue_number)
-            extra_ctx = {
-                "issue_number": it.issue_number,
-                "issue_title": it.issue_title,
-                "issue_url": it.issue_url,
-                "issue_labels": ", ".join(it.issue_labels),
-                "issue_body": body,
-                "lock_group": it.lock_group,
-                "create_prs": bool(create_prs),
-                "draft_prs": bool(draft_prs),
-            }
+                    if track_claim and receipt.get("workspace") and (receipt["workspace"], receipt["branch"]) != (ws.path, ws.branch):
+                        raise RuntimeError("Claim workspace or branch changed; reconcile the retained attempt.")
+                    update_claim(it, workspace=ws.path, branch=ws.branch)
 
-            def wf_emit(ev: Dict[str, Any]) -> None:
-                # annotate workflow events with bootstrap context
-                ev2 = dict(ev or {})
-                ev2.setdefault("bootstrap", {})
-                ev2["bootstrap"].update({"issue_number": it.issue_number, "agent": ws.agent, "task": ws.task, "lock_group": it.lock_group, "workflow": it.workflow})
-                emit(ev2)
+                    if fast:
+                        body = view_issue_body(it.issue_number)
+                        extra_ctx = {
+                            "issue_number": it.issue_number,
+                            "issue_title": it.issue_title,
+                            "issue_url": it.issue_url,
+                            "issue_labels": ", ".join(it.issue_labels),
+                            "issue_body": body,
+                            "lock_group": it.lock_group,
+                            "create_prs": bool(create_prs),
+                            "draft_prs": bool(draft_prs),
+                        }
 
-            summary = run_workflow(
-                root=root,
-                cfg=cfg,
-                pol=pol,
-                agent=ws.agent,
-                task=ws.task,
-                workflow=it.workflow,
-                provider_default=cfg.default_provider,
-                extra_ctx=extra_ctx,
-                dry_run=False,
-                log_json=True,
-                event_cb=wf_emit if event_cb else None,
-            )
-            ok = all(r.ok for r in summary.results)
-            if not ok:
-                ok_all = False
-                log(f"[FAIL] {it.agent}:{it.task} workflow={it.workflow} (lock={it.lock_group})")
-                for r in summary.results:
-                    if not r.ok:
-                        log(f"  step {r.step_index} ({r.step_type}): {r.message}")
-            else:
-                if summary.pr_url:
-                    log(f"Created PR: {summary.pr_url}")
-            emit({"type": "bootstrap_item_end", "agent": it.agent, "task": it.task, "issue_number": it.issue_number, "ok": ok, "pr_url": summary.pr_url})
-        else:
-            emit({"type": "bootstrap_item_end", "agent": it.agent, "task": it.task, "issue_number": it.issue_number, "ok": True, "pr_url": None})
+                        def wf_emit(ev: Dict[str, Any]) -> None:
+                            # annotate workflow events with bootstrap context
+                            ev2 = dict(ev or {})
+                            ev2.setdefault("bootstrap", {})
+                            ev2["bootstrap"].update({"issue_number": it.issue_number, "agent": ws.agent, "task": ws.task, "lock_group": it.lock_group, "workflow": it.workflow})
+                            emit(ev2)
+
+                        update_claim(it, state="executing")
+                        summary = run_workflow(
+                            root=root,
+                            cfg=cfg,
+                            pol=pol,
+                            agent=ws.agent,
+                            task=ws.task,
+                            workflow=it.workflow,
+                            provider_default=cfg.default_provider,
+                            extra_ctx=extra_ctx,
+                            dry_run=False,
+                            log_json=True,
+                            event_cb=wf_emit if event_cb else None,
+                        )
+                        ok = all(r.ok for r in summary.results)
+                        update_claim(it, state="labels_pending" if ok and summary.pr_url else "reconciliation_required",
+                                     pr_url=summary.pr_url,
+                                     diagnostic="" if ok and summary.pr_url else "Reconcile workflow, branch and PR; queue label retained.")
+                        if track_claim and ok and summary.pr_url:
+                            claim_issue(number=it.issue_number, from_label=cfg.queue_label, to_label=cfg.in_progress_label)
+                            update_claim(it, state="completed")
+                            emit({"type": "issue_claimed", "issue_number": it.issue_number,
+                                  "from_label": cfg.queue_label, "to_label": cfg.in_progress_label})
+                        if not ok:
+                            ok_all = False
+                            log(f"[FAIL] {it.agent}:{it.task} workflow={it.workflow} (lock={it.lock_group})")
+                            for r in summary.results:
+                                if not r.ok:
+                                    log(f"  step {r.step_index} ({r.step_type}): {r.message}")
+                        else:
+                            if summary.pr_url:
+                                log(f"Created PR: {summary.pr_url}")
+                        emit({"type": "bootstrap_item_end", "agent": it.agent, "task": it.task, "issue_number": it.issue_number, "ok": ok, "pr_url": summary.pr_url})
+                    else:
+                        emit({"type": "bootstrap_item_end", "agent": it.agent, "task": it.task, "issue_number": it.issue_number, "ok": True, "pr_url": None})
+                except (Exception, SystemExit) as e:
+                    ok_all = False
+                    if track_claim:
+                        with state_lock(st_file):
+                            st = load_state(st_file)
+                            receipt = st["bootstrap_claims"][str(it.issue_number)]
+                            if receipt["state"] != "labels_pending":
+                                receipt["state"] = "reconciliation_required"
+                            receipt["diagnostic"] = str(e)[:2000]
+                            save_state(st_file, st)
+                    log(f"[FAIL] #{it.issue_number}: {e}")
+                    emit({"type": "bootstrap_item_end", "agent": it.agent, "task": it.task,
+                          "issue_number": it.issue_number, "ok": False, "message": str(e)[:2000]})
+        except TimeoutError as e:
+            ok_all = False
+            log(str(e))
+            emit({"type": "bootstrap_item_end", "issue_number": it.issue_number, "ok": False, "message": str(e)})
 
     emit({"type": "bootstrap_end", "ok": ok_all})
 
