@@ -88,18 +88,18 @@ def maintain_sticky_locks(
                 is_merged = bool(st.get("is_merged"))
                 if is_merged or state in ["MERGED"]:
                     if not dry_run:
-                        release_lock(root=root, cfg=cfg, group=li.group, force=True)
+                        release_lock(root=root, cfg=cfg, group=li.group, lease_id=li.lease_id)
                     actions.append(StickyLockAction(group=li.group, action="released", reason="pr merged", pr_number=li.pr_number))
                     continue
                 if state in ["CLOSED"] and not is_merged:
                     if not dry_run:
-                        release_lock(root=root, cfg=cfg, group=li.group, force=True)
+                        release_lock(root=root, cfg=cfg, group=li.group, lease_id=li.lease_id)
                     actions.append(StickyLockAction(group=li.group, action="released", reason="pr closed", pr_number=li.pr_number))
                     continue
 
             # Otherwise, renew
             if not dry_run:
-                renew_lock(root=root, cfg=cfg, group=li.group, ttl_sec=ttl, force=True)
+                renew_lock(root=root, cfg=cfg, group=li.group, ttl_sec=ttl, lease_id=li.lease_id)
             actions.append(StickyLockAction(group=li.group, action="renewed", reason="keepalive", pr_number=li.pr_number))
         except GhMissing as e:
             actions.append(StickyLockAction(group=li.group, action="error", reason=str(e), pr_number=li.pr_number))

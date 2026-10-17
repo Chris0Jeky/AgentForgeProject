@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import time
+from uuid import uuid4
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -15,6 +16,7 @@ except Exception:  # pragma: no cover
 
 from .guardrails import sanitize_id
 from .utils import ensure_dir, atomic_write_text
+from .state import state_lock
 
 
 class LockError(RuntimeError):
@@ -48,6 +50,7 @@ class LockInfo:
 
     # Free-form extra metadata (non-security-critical)
     meta: Optional[Dict[str, Any]] = None
+    lease_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -119,17 +122,10 @@ def _read_lock(path: Path) -> Optional[LockInfo]:
             branch=str(j.get("branch")) if j.get("branch") is not None else None,
             last_renew_ts=int(j.get("last_renew_ts") or 0),
             meta=dict(j.get("meta") or {}) if isinstance(j.get("meta"), dict) else None,
+            lease_id=str(j.get("lease_id") or ""),
         )
     except Exception:
         return None
-
-
-def _write_lock_create_exclusive(path: Path, info: LockInfo) -> None:
-    ensure_dir(path.parent)
-    raw = json.dumps(info.__dict__, indent=2)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(raw)
 
 
 def _write_lock_replace(path: Path, info: LockInfo) -> None:
@@ -170,55 +166,47 @@ def acquire_lock(
         raise LockError("group is required")
     path = _lock_path(root, cfg, group)
 
-    now = _now()
-    ttl_sec = int(ttl_sec or 0)
-    if ttl_sec <= 0:
-        ttl_sec = 6 * 60 * 60
+    with state_lock(path):
+        now = _now()
+        ttl_sec = int(ttl_sec or 0)
+        if ttl_sec <= 0:
+            ttl_sec = 6 * 60 * 60
 
-    info_new = LockInfo(
-        group=group,
-        agent=agent,
-        task=task,
-        hostname=socket.gethostname(),
-        pid=os.getpid(),
-        created_ts=now,
-        expires_ts=now + ttl_sec,
-        ttl_sec=ttl_sec,
-        sticky=bool(sticky),
-        pr_number=int(pr_number) if pr_number is not None else None,
-        branch=branch,
-        last_renew_ts=now,
-        meta=meta,
-    )
+        info_new = LockInfo(
+            group=group,
+            agent=agent,
+            task=task,
+            hostname=socket.gethostname(),
+            pid=os.getpid(),
+            created_ts=now,
+            expires_ts=now + ttl_sec,
+            ttl_sec=ttl_sec,
+            sticky=bool(sticky),
+            pr_number=int(pr_number) if pr_number is not None else None,
+            branch=branch,
+            last_renew_ts=now,
+            meta=meta,
+            lease_id=uuid4().hex,
+        )
 
-    # Fast path: create exclusively
-    try:
-        _write_lock_create_exclusive(path, info_new)
-        return info_new
-    except FileExistsError:
-        pass
+        holder = _read_lock(path)
+        if holder is None:
+            if path.exists() and not force:
+                raise LockError(f"Lock file exists but could not be parsed: {path}. Use --force to replace.")
+            _write_lock_replace(path, info_new)
+            return info_new
 
-    # Existing: read and decide
-    holder = _read_lock(path)
-    if holder is None:
-        # Corrupt file -> allow replace if force
-        if not force:
-            raise LockError(f"Lock file exists but could not be parsed: {path}. Use --force to replace.")
+        # Renewal keeps its lease identity; takeover (including force) creates a new one.
+        if holder.agent == agent and holder.task == task and not is_expired(holder) and not force:
+            renewed = replace(holder, expires_ts=now + ttl_sec, ttl_sec=ttl_sec, last_renew_ts=now)
+            _write_lock_replace(path, renewed)
+            return renewed
+
+        if not is_expired(holder) and not force:
+            raise LockTakenError(group, holder)
+
         _write_lock_replace(path, info_new)
         return info_new
-
-    # Renewal by same owner
-    if holder.agent == agent and holder.task == task and not is_expired(holder) and not force:
-        renewed = replace(holder, expires_ts=now + ttl_sec, ttl_sec=ttl_sec, last_renew_ts=now)
-        _write_lock_replace(path, renewed)
-        return renewed
-
-    if not is_expired(holder) and not force:
-        raise LockTakenError(group, holder)
-
-    # Replace stale lock (expired) or force steal
-    _write_lock_replace(path, info_new)
-    return info_new
 
 
 def update_lock(
@@ -229,39 +217,44 @@ def update_lock(
     agent: Optional[str] = None,
     task: Optional[str] = None,
     force: bool = False,
+    lease_id: Optional[str] = None,
     patch: Dict[str, Any],
 ) -> LockInfo:
     """Update fields of an existing lock, optionally verifying ownership."""
     path = _lock_path(root, cfg, group)
-    holder = _read_lock(path)
-    if holder is None:
-        raise LockError(f"Lock '{group}' not found")
-    if not force:
-        if agent and holder.agent != agent:
-            raise LockError(f"Lock '{group}' owned by {holder.agent}:{holder.task}, not {agent}:{task or ''}")
-        if task and holder.task != task:
-            raise LockError(f"Lock '{group}' owned by {holder.agent}:{holder.task}, not {agent or ''}:{task}")
-    # Build a new LockInfo using dataclass replace where possible.
-    upd = dict(patch or {})
-    # Merge meta dict if provided
-    meta = holder.meta
-    if "meta" in upd and isinstance(upd["meta"], dict):
-        meta = dict(meta or {})
-        meta.update(upd["meta"])
-        upd["meta"] = meta
+    with state_lock(path):
+        holder = _read_lock(path)
+        if holder is None:
+            raise LockError(f"Lock '{group}' not found")
+        if not force:
+            if lease_id is not None and holder.lease_id != lease_id:
+                raise LockTakenError(group, holder)
+            if agent and holder.agent != agent:
+                raise LockTakenError(group, holder)
+            if task and holder.task != task:
+                raise LockTakenError(group, holder)
+        # Build a new LockInfo using dataclass replace where possible.
+        upd = dict(patch or {})
+        # Merge meta dict if provided
+        meta = holder.meta
+        if "meta" in upd and isinstance(upd["meta"], dict):
+            meta = dict(meta or {})
+            meta.update(upd["meta"])
+            upd["meta"] = meta
 
-    # Normalize certain fields
-    if "pr_number" in upd and upd["pr_number"] is not None:
-        try:
-            upd["pr_number"] = int(upd["pr_number"])
-        except Exception:
-            upd["pr_number"] = None
-    if "ttl_sec" in upd and upd["ttl_sec"] is not None:
-        upd["ttl_sec"] = int(upd["ttl_sec"])
+        # Normalize certain fields
+        if "pr_number" in upd and upd["pr_number"] is not None:
+            try:
+                upd["pr_number"] = int(upd["pr_number"])
+            except Exception:
+                upd["pr_number"] = None
+        if "ttl_sec" in upd and upd["ttl_sec"] is not None:
+            upd["ttl_sec"] = int(upd["ttl_sec"])
 
-    new = replace(holder, **upd)
-    _write_lock_replace(path, new)
-    return new
+        new = replace(holder, **upd)
+        _write_lock_replace(path, new)
+        return new
+
 
 
 def renew_lock(
@@ -273,6 +266,7 @@ def renew_lock(
     agent: Optional[str] = None,
     task: Optional[str] = None,
     force: bool = False,
+    lease_id: Optional[str] = None,
 ) -> LockInfo:
     """Extend the lock expiry.
 
@@ -290,6 +284,7 @@ def renew_lock(
         agent=agent,
         task=task,
         force=force,
+        lease_id=holder.lease_id if lease_id is None else lease_id,
         patch={
             "ttl_sec": ttl,
             "expires_ts": now + ttl,
@@ -309,33 +304,40 @@ def mark_lock_sticky(
     pr_number: Optional[int] = None,
     branch: Optional[str] = None,
     force: bool = False,
+    lease_id: Optional[str] = None,
 ) -> LockInfo:
     patch: Dict[str, Any] = {"sticky": bool(sticky)}
     if pr_number is not None:
         patch["pr_number"] = int(pr_number)
     if branch is not None:
         patch["branch"] = branch
-    return update_lock(root=root, cfg=cfg, group=group, agent=agent, task=task, force=force, patch=patch)
+    return update_lock(root=root, cfg=cfg, group=group, agent=agent, task=task, force=force, lease_id=lease_id, patch=patch)
 
 
-def release_lock(*, root: Path, cfg, group: str, agent: Optional[str]=None, task: Optional[str]=None, force: bool=False) -> None:
+def release_lock(*, root: Path, cfg, group: str, agent: Optional[str]=None, task: Optional[str]=None, force: bool=False, lease_id: Optional[str]=None) -> None:
     group = group.strip()
     if not group:
         raise LockError("group is required")
     path = _lock_path(root, cfg, group)
-    holder = _read_lock(path)
-    if holder is None:
-        return
-    if not force:
-        # Mirror acquire semantics: mismatched owner raises LockTakenError for ergonomics.
-        if agent and holder.agent != agent:
-            raise LockTakenError(group, holder)
-        if task and holder.task != task:
-            raise LockTakenError(group, holder)
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return
+    with state_lock(path):
+        holder = _read_lock(path)
+        if holder is None:
+            return
+        if not force:
+            if lease_id is not None and holder.lease_id != lease_id:
+                raise LockTakenError(group, holder)
+            # Mirror acquire semantics: mismatched owner raises LockTakenError for ergonomics.
+            if agent and holder.agent != agent:
+                raise LockTakenError(group, holder)
+            if task and holder.task != task:
+                raise LockTakenError(group, holder)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+
+
+
 def list_locks(*, root: Path, cfg) -> List[LockInfo]:
     d = _lock_dir(root, cfg)
     if not d.exists():

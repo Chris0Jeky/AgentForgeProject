@@ -81,6 +81,12 @@ Locks have TTLs to reduce “stuck” situations.
 - expired locks can be stolen automatically
 - `--force` can steal immediately
 
+An OS-owned sidecar lock serializes each group's acquisition, update and release.
+Takeovers receive a new lease identity; workflows and sticky maintenance check
+that identity before changing a lease they previously observed. Explicit
+`--force` operations can override ownership checks. Locks remain local to one
+checkout.
+
 ---
 
 ## locks.toml metadata (auto-routing)

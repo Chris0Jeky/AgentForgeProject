@@ -18,6 +18,7 @@ class Workspace:
     branch: str
     port: int
     compose_project: Optional[str] = None
+    status: str = "active"
 
 def _ws_key(agent: str, task: str) -> str:
     return f"{agent}:{task}"
@@ -60,84 +61,131 @@ def _repair_worktree_metadata(root: Path, wpath: Path) -> None:
         # Keep spawn resilient; a repair failure should not block normal usage.
         pass
 
+def _branch_exists(root: Path, branch: str) -> bool:
+    ref = f"refs/heads/{branch}"
+    return ref in out(["git", "for-each-ref", "--format=%(refname)", ref], cwd=root).splitlines()
+
+
+def _worktree_branch(root: Path, wpath: Path) -> Optional[str]:
+    raw = out(["git", "worktree", "list", "--porcelain", "-z"], cwd=root, encoding="utf-8")
+    for entry in raw.split("\0\0"):
+        fields = {key: value for key, _, value in (line.partition(" ") for line in entry.split("\0"))}
+        if "worktree" in fields and Path(fields["worktree"]).resolve() == wpath.resolve():
+            if "locked" in fields or "prunable" in fields:
+                raise SystemExit(f"Worktree needs inspection before retry: {wpath}")
+            return fields.get("branch", "").removeprefix("refs/heads/")
+    return None
+
+
 def spawn_workspace(root: Path, cfg: RepoConfig, pol: Policy, state_file: Path, *, agent: str, task: str, base_ref: Optional[str]=None) -> Workspace:
     ensure_dir(root / cfg.worktrees_dir)
     wpath = root / cfg.worktrees_dir / _folder_name(agent, task)
-    if wpath.exists():
-        raise SystemExit(f"Workspace path exists: {wpath}")
-
-    # Fetch remotes (best-effort)
-    if _has_remote(root, cfg.default_remote):
-        try:
-            run(["git", "fetch", cfg.default_remote, "--prune"], cwd=root)
-        except Exception:
-            pass
-
     br = _branch_name(agent, task)
-    base = base_ref or cfg.default_base_ref
-    # If base ref doesn't exist locally (e.g., no remote), fall back to HEAD
-    try:
-        run(["git", "rev-parse", "--verify", base], cwd=root)
-    except Exception:
-        base = "HEAD"
-    run(["git", "worktree", "add", "-b", br, str(wpath), base], cwd=root)
-    _repair_worktree_metadata(root, wpath)
-
+    k = _ws_key(agent, task)
+    # Keep the state lock through Git and env setup so reservations cannot be reused.
     with state_lock(state_file):
         st = load_state(state_file)
-        port = _alloc_port(cfg, st, agent, task, wpath)
-        compose_project = f"{cfg.compose_project_prefix}-{sanitize_id(agent)}-{sanitize_id(task)}" if cfg.compose_file else None
-        st.setdefault("workspaces", {})[_ws_key(agent, task)] = {
-            "agent": agent,
-            "task": task,
-            "path": str(wpath),
-            "branch": br,
-            "port": port,
-            "compose_project": compose_project,
-            "created_ts": int(time.time()),
-        }
-        save_state(state_file, st)
+        ws = st.get("workspaces", {}).get(k)
+        if ws:
+            if ws.get("status", "active") != "spawning":
+                raise SystemExit(f"Workspace already tracked ({ws.get('status', 'active')}): {k}")
+            if Path(ws["path"]).resolve() != wpath.resolve() or ws["branch"] != br:
+                raise SystemExit(f"Workspace journal does not match requested path/branch: {k}")
+            port = int(ws["port"])
+            compose_project = ws.get("compose_project")
+            base = ws["base_ref"]
+        else:
+            if wpath.exists():
+                raise SystemExit(f"Workspace path exists: {wpath}")
+            if _branch_exists(root, br):
+                raise SystemExit(f"Workspace branch exists: {br}")
+            port = _alloc_port(cfg, st, agent, task, wpath)
+            # Fetch remotes (best-effort)
+            if _has_remote(root, cfg.default_remote):
+                try:
+                    run(["git", "fetch", cfg.default_remote, "--prune"], cwd=root)
+                except Exception:
+                    pass
+            base = base_ref or cfg.default_base_ref
+            try:
+                run(["git", "rev-parse", "--verify", base], cwd=root)
+            except Exception:
+                base = "HEAD"
+            compose_project = f"{cfg.compose_project_prefix}-{sanitize_id(agent)}-{sanitize_id(task)}" if cfg.compose_file else None
+            ws = {
+                "agent": agent,
+                "task": task,
+                "path": str(wpath),
+                "branch": br,
+                "port": port,
+                "compose_project": compose_project,
+                "created_ts": int(time.time()),
+                "base_ref": base,
+                "status": "spawning",
+            }
+            st.setdefault("workspaces", {})[k] = ws
+            save_state(state_file, st)
 
-    # Write per-workspace env (project-specific env vars are your choice)
-    env_path = wpath / ".agentforge.env"
-    cache_base = root / cfg.cache_dir / _folder_name(agent, task)
-    ensure_dir(cache_base)
-    # Generic caches (can be extended per project)
-    env = [
-        f"AGENTFORGE_AGENT={agent}",
-        f"AGENTFORGE_TASK={task}",
-        f"AGENTFORGE_PORT={port}",
-        f"AGENTFORGE_CACHE={cache_base}",
-        f"NUGET_PACKAGES={cache_base / 'nuget'}",
-        f"DOTNET_CLI_HOME={cache_base / 'dotnet_home'}",
-        f"NPM_CONFIG_CACHE={cache_base / 'npm_cache'}",
-    ]
-    ensure_dir(cache_base / "nuget")
-    ensure_dir(cache_base / "dotnet_home")
-    ensure_dir(cache_base / "npm_cache")
-    env_path.write_text("\n".join(env) + "\n", encoding="utf-8")
+        registered = _worktree_branch(root, wpath)
+        if registered is not None:
+            if registered != br:
+                raise SystemExit(f"Worktree branch does not match journal: {wpath}")
+        else:
+            if wpath.exists():
+                raise SystemExit(f"Unregistered workspace path exists: {wpath}")
+            if _branch_exists(root, br):
+                run(["git", "worktree", "add", str(wpath), br], cwd=root)
+            else:
+                run(["git", "worktree", "add", "-b", br, str(wpath), base], cwd=root)
+        _repair_worktree_metadata(root, wpath)
+        if _worktree_branch(root, wpath) != br:
+            raise SystemExit(f"Worktree metadata does not match journal: {wpath}")
 
-    # direnv convenience
-    (wpath / ".envrc").write_text("dotenv_if_exists .agentforge.env\n", encoding="utf-8")
-    # PowerShell env loader convenience
-    (wpath / "set-env.ps1").write_text(
-        """Get-Content .agentforge.env | ForEach-Object {
+        # Write per-workspace env (project-specific env vars are your choice)
+        env_path = wpath / ".agentforge.env"
+        cache_base = root / cfg.cache_dir / _folder_name(agent, task)
+        ensure_dir(cache_base)
+        # Generic caches (can be extended per project)
+        env = [
+            f"AGENTFORGE_AGENT={agent}",
+            f"AGENTFORGE_TASK={task}",
+            f"AGENTFORGE_PORT={port}",
+            f"AGENTFORGE_CACHE={cache_base}",
+            f"NUGET_PACKAGES={cache_base / 'nuget'}",
+            f"DOTNET_CLI_HOME={cache_base / 'dotnet_home'}",
+            f"NPM_CONFIG_CACHE={cache_base / 'npm_cache'}",
+        ]
+        ensure_dir(cache_base / "nuget")
+        ensure_dir(cache_base / "dotnet_home")
+        ensure_dir(cache_base / "npm_cache")
+        env_path.write_text("\n".join(env) + "\n", encoding="utf-8")
+
+        # direnv convenience
+        (wpath / ".envrc").write_text("dotenv_if_exists .agentforge.env\n", encoding="utf-8")
+        # PowerShell env loader convenience
+        (wpath / "set-env.ps1").write_text(
+            """Get-Content .agentforge.env | ForEach-Object {
   if ($_ -match '^(\\w+)=(.*)$') {
     [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2])
   }
 }
 Write-Host "Loaded .agentforge.env into this process environment."
 """,
-        encoding="utf-8"
-    )
+            encoding="utf-8"
+        )
+
+        ws["status"] = "active"
+        save_state(state_file, st)
 
     return Workspace(agent=agent, task=task, path=str(wpath), branch=br, port=port, compose_project=compose_project)
 
-def list_workspaces(state_file: Path) -> List[Workspace]:
+def list_workspaces(state_file: Path, *, include_pending: bool = False) -> List[Workspace]:
     st = load_state(state_file)
     items = st.get("workspaces", {})
     out_ws: List[Workspace] = []
     for _, v in items.items():
+        if not include_pending and v.get("status", "active") != "active":
+            continue
         out_ws.append(
             Workspace(
                 agent=v["agent"],
@@ -146,6 +194,7 @@ def list_workspaces(state_file: Path) -> List[Workspace]:
                 branch=v["branch"],
                 port=int(v["port"]),
                 compose_project=v.get("compose_project"),
+                status=v.get("status", "active"),
             )
         )
     out_ws.sort(key=lambda w: (w.agent, w.task))
@@ -158,16 +207,23 @@ def remove_workspace(root: Path, cfg: RepoConfig, state_file: Path, *, agent: st
         ws = st.get("workspaces", {}).get(k)
         if not ws:
             raise SystemExit(f"Workspace not found in state: {k}")
-        port = int(ws["port"])
-        st.get("ports", {}).pop(str(port), None)
-        st.get("workspaces", {}).pop(k, None)
+        ws["status"] = "removing"
+        # Only this call's explicit flag may authorize branch -D; never a remembered earlier attempt.
+        ws.pop("delete_branch", None)
         save_state(state_file, st)
 
-    wpath = Path(ws["path"])
-    run(["git", "worktree", "remove", "--force", str(wpath)], cwd=root)
+        wpath = Path(ws["path"])
+        registered = _worktree_branch(root, wpath)
+        if registered is not None:
+            if registered != ws["branch"]:
+                raise SystemExit(f"Worktree branch does not match journal: {wpath}")
+            run(["git", "worktree", "remove", str(wpath)], cwd=root)
+        elif wpath.exists():
+            raise SystemExit(f"Unregistered workspace path exists: {wpath}")
 
-    if delete_branch:
-        try:
+        if delete_branch and _branch_exists(root, ws["branch"]):
             run(["git", "branch", "-D", ws["branch"]], cwd=root)
-        except Exception:
-            pass
+
+        st.get("ports", {}).pop(str(ws["port"]), None)
+        st.get("workspaces", {}).pop(k, None)
+        save_state(state_file, st)
