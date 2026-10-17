@@ -56,3 +56,14 @@ def test_removal_refuses_a_replaced_worktree(tmp_path, monkeypatch):
     assert git.commands == before
     assert Path(ws.path).exists()
     assert str(ws.port) in load_state(state)["ports"]
+
+
+def test_refused_branch_deletion_is_not_remembered_by_a_later_plain_removal(tmp_path, monkeypatch):
+    cfg, pol, state, git = setup_workspace(tmp_path, monkeypatch)
+    ws = workspace.spawn_workspace(tmp_path, cfg, pol, state, agent="a", task="task")
+    git.fail_remove = True
+    with pytest.raises(RuntimeError, match="git removal failed"):
+        workspace.remove_workspace(tmp_path, cfg, state, agent="a", task="task", delete_branch=True)
+    git.fail_remove = False
+    workspace.remove_workspace(tmp_path, cfg, state, agent="a", task="task")
+    assert ws.branch in git.branches  # unpushed work on the branch survives a plain rm

@@ -52,10 +52,10 @@ def test_real_git_reconciles_interrupted_spawn_and_removal(tmp_path, monkeypatch
 
     monkeypatch.setattr(workspace, "save_state", crash_before_publication)
     with pytest.raises(Interrupted):
-        workspace.remove_workspace(root, cfg, state, agent="a", task="task")
+        workspace.remove_workspace(root, cfg, state, agent="a", task="task", delete_branch=True)
     assert not Path(ws.path).exists()
     assert load_state(state)["workspaces"]["a:task"]["status"] == "removing"
     monkeypatch.setattr(workspace, "save_state", original_save)
-    workspace.remove_workspace(root, cfg, state, agent="a", task="task")
+    workspace.remove_workspace(root, cfg, state, agent="a", task="task", delete_branch=True)
     assert load_state(state)["workspaces"] == load_state(state)["ports"] == {}
     assert not out(["git", "for-each-ref", "--format=%(refname)", "refs/heads/af/"], cwd=root)

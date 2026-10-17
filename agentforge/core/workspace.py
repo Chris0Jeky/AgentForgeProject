@@ -208,7 +208,8 @@ def remove_workspace(root: Path, cfg: RepoConfig, state_file: Path, *, agent: st
         if not ws:
             raise SystemExit(f"Workspace not found in state: {k}")
         ws["status"] = "removing"
-        ws["delete_branch"] = bool(delete_branch or ws.get("delete_branch"))
+        # Only this call's explicit flag may authorize branch -D; never a remembered earlier attempt.
+        ws.pop("delete_branch", None)
         save_state(state_file, st)
 
         wpath = Path(ws["path"])
@@ -220,7 +221,7 @@ def remove_workspace(root: Path, cfg: RepoConfig, state_file: Path, *, agent: st
         elif wpath.exists():
             raise SystemExit(f"Unregistered workspace path exists: {wpath}")
 
-        if ws["delete_branch"] and _branch_exists(root, ws["branch"]):
+        if delete_branch and _branch_exists(root, ws["branch"]):
             run(["git", "branch", "-D", ws["branch"]], cwd=root)
 
         st.get("ports", {}).pop(str(ws["port"]), None)
