@@ -47,30 +47,24 @@ def _git_push(ws_path: Path, branch: str, remote: str="origin") -> None:
 
 def _status_changed_paths_from_porcelain(porcelain: str) -> List[str]:
     paths: List[str] = []
-    for line in (porcelain or "").splitlines():
-        if not line:
+    records = iter(porcelain.split("\0"))
+    for record in records:
+        if not record:
             continue
-        # Porcelain v1: XY <path>  or  R  old -> new
-        path_part = line[3:] if len(line) >= 4 else line
-        if " -> " in path_part:
-            path_part = path_part.split(" -> ", 1)[1]
-        p = path_part.strip()
-        if p.startswith('"') and p.endswith('"') and len(p) >= 2:
-            p = p[1:-1]
-        if p:
-            paths.append(p.replace("\\", "/"))
-    # Stable + unique while preserving order
-    seen = set()
-    out_paths: List[str] = []
-    for p in paths:
-        if p in seen:
-            continue
-        seen.add(p)
-        out_paths.append(p)
-    return out_paths
+        status = record[:2]
+        paths.append(record[3:])
+        # Porcelain -z writes the destination first, followed by the source.
+        if "R" in status or "C" in status:
+            paths.append(next(records))
+    return list(dict.fromkeys(paths))
+
 
 def _working_tree_changed_files(ws_path: Path) -> List[str]:
-    txt = out(["git", "status", "--porcelain"], cwd=ws_path)
+    # Preserve status-prefix whitespace and literal filenames, including newlines.
+    _, txt, _ = run(
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cwd=ws_path, capture=True, encoding="utf-8",
+    )
     return _status_changed_paths_from_porcelain(txt)
 
 def _violating_paths(changed_paths: List[str], allowed_globs: List[str]) -> List[str]:
