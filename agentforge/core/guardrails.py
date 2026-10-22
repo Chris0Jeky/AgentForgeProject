@@ -15,9 +15,9 @@ def sanitize_id(s: str) -> str:
     s = re.sub(r"-{2,}", "-", s)
     return s.strip("-") or "id"
 
-def matches_any_glob(path: str, globs: Iterable[str]) -> bool:
-    # Normalize to posix for stable matching across OS
-    p = PurePosixPath(path.replace("\\", "/"))
+def matches_any_glob(path: str, globs: Iterable[str], *, git_path: bool = False) -> bool:
+    # Git uses '/' on every OS; a backslash in Git output is a literal filename character.
+    p = PurePosixPath(path if git_path else path.replace("\\", "/"))
     for g in globs:
         g = (g or "").strip()
         if not g:

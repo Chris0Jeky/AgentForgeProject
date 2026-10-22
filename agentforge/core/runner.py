@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Dict, Optional, List
 
@@ -60,19 +61,19 @@ def _status_changed_paths_from_porcelain(porcelain: str) -> List[str]:
 
 
 def _working_tree_changed_files(ws_path: Path) -> List[str]:
-    # Preserve status-prefix whitespace and literal filenames, including newlines.
-    _, txt, _ = run(
+    # Text-mode capture would translate carriage returns inside POSIX filenames.
+    result = subprocess.run(
         ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        cwd=ws_path, capture=True, encoding="utf-8",
+        cwd=ws_path, capture_output=True, check=True,
     )
-    return _status_changed_paths_from_porcelain(txt)
+    return _status_changed_paths_from_porcelain(result.stdout.decode("utf-8", errors="surrogateescape"))
 
 def _violating_paths(changed_paths: List[str], allowed_globs: List[str]) -> List[str]:
     if not allowed_globs:
         return []
     bad: List[str] = []
     for p in changed_paths:
-        if not matches_any_glob(p, allowed_globs):
+        if not matches_any_glob(p, allowed_globs, git_path=True):
             bad.append(p)
     return bad
 

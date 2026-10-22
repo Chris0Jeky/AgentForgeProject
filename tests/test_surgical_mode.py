@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
@@ -76,3 +77,28 @@ def test_surgical_paths_expand_untracked_directories(repository):
 def test_surgical_paths_keep_first_unstaged_filename(repository):
     (repository / "source.txt").write_text("changed\n")
     assert _working_tree_changed_files(repository) == ["source.txt"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows forbids these filename characters")
+@pytest.mark.parametrize(
+    "actual, allowed",
+    [
+        ("allowed\rname.txt", "allowed\nname.txt"),
+        ("allowed\r\nname.txt", "allowed\nname.txt"),
+        ("docs\\allowed.txt", "docs/allowed.txt"),
+    ],
+)
+def test_surgical_paths_cannot_alias_distinct_posix_names(repository, actual, allowed):
+    (repository / actual).write_text("out of scope\n")
+    changed = _working_tree_changed_files(repository)
+    assert changed == [actual]
+    assert _violating_paths(changed, [allowed]) == [actual]
+    assert _violating_paths(changed, [actual]) == []
+
+
+def test_surgical_paths_allow_git_directory_separators_on_every_platform(repository):
+    (repository / "docs").mkdir()
+    (repository / "docs" / "allowed.txt").write_text("allowed\n")
+    changed = _working_tree_changed_files(repository)
+    assert changed == ["docs/allowed.txt"]
+    assert _violating_paths(changed, ["docs/allowed.txt"]) == []
